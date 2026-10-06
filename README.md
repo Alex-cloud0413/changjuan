@@ -1,6 +1,6 @@
 # 长卷（LongShot）
 
-一个完全在 iPhone 本机运行的长截图 App。仅支持 iOS 27 或更新版本，使用 ScreenCaptureKit 捕获用户主动滚动的画面；结束后自动去重、拼接、裁去顶部系统区域并保存到照片。1.1.0 新增双向滚动与手动跨页分段，Build 29 进一步放大、加粗控制中心三笔标志，保持桌面 App 图标不变。Build 29 已上传 App Store Connect，准备替换原 Build 28 的审核提交，尚未替换公开分发版本。
+一个完全在 iPhone 本机运行的长截图 App。仅支持 iOS 27 或更新版本，使用 ScreenCaptureKit 捕获用户主动滚动的画面；结束后自动去重、拼接、裁去顶部系统区域并保存到照片。1.1.0 新增双向滚动与手动跨页分段，Build 29 进一步放大、加粗控制中心三笔标志，保持桌面 App 图标不变。Build 29 已于 2026-10-06 替换原 Build 28 并重新提交 App Store 审核，当前「正在等待审核」，尚未替换公开分发版本。
 
 源码使用独立私有仓库 [Alex-cloud0413/changjuan](https://github.com/Alex-cloud0413/changjuan)；不纳入 `life-os-workspace`。安装包、签名材料、测试录屏和临时输出不进入 Git。
 
@@ -33,11 +33,11 @@ Apple 的系统确认无法由第三方 App 跳过。录制只有在用户明确
 - Xcode 27 RC（Build 27A266a）
 - iOS 27 SDK
 - 最低系统版本 iOS 27.0（主 App 与所有扩展统一）
-- 定版版本号 1.1.0，构建号 29（已上传 App Store Connect，待替换审核提交）
+- 定版版本号 1.1.0，构建号 29（App Store 状态：正在等待审核）
 
 用户于 2026-10-06 确认 Build 28 可用，并指定定版版本号为 1.1.0。主 App 与 Widgets 已重新构建为 1.1.0（Build 28），严格深度签名检查通过；「GYM iPhone」已原位覆盖更新，设备回读版本正确，普通启动成功，未卸载或清理原有数据。同日使用 Apple Distribution 签名上传并提交审核；继续沿用手动发布方式，审核通过后仍需发布。历史验证记录保留原实际测试版本，不回写为 1.1.0；本次发布记录见 [1.1.0 验证记录](Tests/Validation-1.1.0-build28.md)。
 
-同日根据用户反馈修改控制中心符号，Build 29 已原位更新到「GYM iPhone」，通过资源渲染、签名与原有采集拼接回归检查。用户随后授权将本次修改同步至独立 GitHub 仓库，并替换 App Store 审核提交；当前发布记录见 [Build 29 发布验证](Tests/Validation-1.1.0-build29.md)。原 `v1.1.0` 标签保留 Build 28 历史，不强制移动旧标签。
+同日根据用户反馈修改控制中心符号，Build 29 已原位更新到「GYM iPhone」，通过资源渲染、签名与原有采集拼接回归检查。用户随后授权将本次修改同步至独立 GitHub 仓库，并替换 App Store 审核提交。Build 29 已正式重新提交，继续沿用手动发布方式；当前发布记录见 [Build 29 发布验证](Tests/Validation-1.1.0-build29.md)。新版本使用 `v1.1.0-build29` 标签；原 `v1.1.0` 标签保留 Build 28 历史，不强制移动旧标签。
 
 用 `/Applications/Xcode-27-RC.app` 打开 `LongShot.xcodeproj`，选择 `LongShot` scheme 和目标 iPhone 后运行。主 App 启用 `screen-capture` 后台模式；自定义控制使用在主 App 进程后台执行的 `LiveActivityIntent`，等待系统选择和 stream 启动确认，不自动同意录屏权限。
 

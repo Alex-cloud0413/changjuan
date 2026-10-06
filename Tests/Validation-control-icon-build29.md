@@ -41,6 +41,11 @@ This is a local test build. The project still specifies Build 28; the device
 build used `CURRENT_PROJECT_VERSION=29` as a command-line override. No Git commit,
 GitHub push, App Store upload or replacement of the submitted Build 28 occurred.
 
+The paragraph above records the initial local-test boundary. The user later
+authorized publication of these changes; the project was advanced to Build 29,
+GitHub was updated and App Store review was resubmitted. See
+[the subsequent release record](Validation-1.1.0-build29.md).
+
 ## Evidence and rerun
 
 Evidence directory, relative to the workspace root:
