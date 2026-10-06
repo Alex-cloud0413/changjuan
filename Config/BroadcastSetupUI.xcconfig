@@ -1,0 +1,5 @@
+#include "Shared.xcconfig"
+
+PRODUCT_BUNDLE_IDENTIFIER = com.gaoyiming.longshot.private.BroadcastSetupUI
+PRODUCT_NAME = BroadcastSetupUI
+INFOPLIST_FILE = BroadcastSetupUI/Info.plist

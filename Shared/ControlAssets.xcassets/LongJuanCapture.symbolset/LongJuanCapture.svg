@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="3300" height="2200">
+  <!-- The three outlines reproduce AppIcon-LongJuan-v2's capture corners and
+       vertical continuation mark. System surfaces supply the tint. -->
+  <g id="Notes"><text id="template-version">Template v.3.0</text></g>
+  <g id="Guides">
+    <line id="Baseline-S" x1="0" x2="3300" y1="696" y2="696"/>
+    <line id="Capline-S" x1="0" x2="3300" y1="625.54" y2="625.54"/>
+    <line id="Baseline-M" x1="0" x2="3300" y1="1126" y2="1126"/>
+    <line id="Capline-M" x1="0" x2="3300" y1="1055.54" y2="1055.54"/>
+    <line id="Baseline-L" x1="0" x2="3300" y1="1556" y2="1556"/>
+    <line id="Capline-L" x1="0" x2="3300" y1="1485.54" y2="1485.54"/>
+    <line id="left-margin-Regular-M" x1="1395" x2="1395" y1="1020" y2="1160"/>
+    <line id="right-margin-Regular-M" x1="1467" x2="1467" y1="1020" y2="1160"/>
+  </g>
+  <g id="Symbols">
+    <g id="Regular-M" transform="translate(1400 1049.89) scale(0.16)" fill="#000000">
+      <path d="M27 0 H171 A13 13 0 0 1 171 26 H26 V194 A13 13 0 0 1 0 194 V27 A27 27 0 0 1 27 0 Z"/>
+      <path d="M372 113 A13 13 0 0 1 385 126 V295 A27 27 0 0 1 358 322 H215 A13 13 0 0 1 215 296 H359 V126 A13 13 0 0 1 372 113 Z"/>
+      <path d="M193 373 A13 13 0 0 1 206 386 V498 A13 13 0 0 1 180 498 V386 A13 13 0 0 1 193 373 Z"/>
+    </g>
+  </g>
+</svg>

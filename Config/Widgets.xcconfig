@@ -1,0 +1,6 @@
+#include "Shared.xcconfig"
+
+PRODUCT_BUNDLE_IDENTIFIER = com.gaoyiming.longshot.private.Widgets
+PRODUCT_NAME = LongScrollWidgets
+INFOPLIST_FILE = LongScrollWidgets/Info.plist
+CODE_SIGN_ENTITLEMENTS = LongScrollWidgets/LongScrollWidgets.entitlements

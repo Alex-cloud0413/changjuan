@@ -1,0 +1,6 @@
+#include "Shared.xcconfig"
+
+PRODUCT_BUNDLE_IDENTIFIER = com.gaoyiming.longshot.private.BroadcastUpload
+PRODUCT_NAME = BroadcastUpload
+INFOPLIST_FILE = BroadcastUpload/Info.plist
+CODE_SIGN_ENTITLEMENTS = BroadcastUpload/BroadcastUpload.entitlements

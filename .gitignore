@@ -1,0 +1,19 @@
+# Rebuildable output and local installation packages
+Build/
+Dist/
+DistributionSite/
+DerivedData/
+*.xcarchive
+*.ipa
+*.mobileprovision
+*.p12
+*.p8
+*.cer
+*.xcresult
+**/xcuserdata/
+.DS_Store
+
+# Local secrets
+.env
+.env.*
+!.env.example

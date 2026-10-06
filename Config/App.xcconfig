@@ -1,0 +1,8 @@
+#include "Shared.xcconfig"
+
+PRODUCT_BUNDLE_IDENTIFIER = com.gaoyiming.longshot.private
+PRODUCT_NAME = LongShot
+INFOPLIST_FILE = LongShotApp/Info.plist
+CODE_SIGN_ENTITLEMENTS = LongShotApp/LongShot.entitlements
+ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon
+OTHER_SWIFT_FLAGS = $(inherited) -D LONGSHOT_MAIN_APP

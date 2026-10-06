@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>destination</key>
+	<string>export</string>
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+	<key>method</key>
+	<string>release-testing</string>
+	<key>manifest</key>
+	<dict>
+		<key>appURL</key>
+		<string>https://changjuan-install-a7f4c2d9.wen-s-0413.chatgpt.site/LongShot-1.0.0-build25-AdHoc.ipa</string>
+		<key>displayImageURL</key>
+		<string>https://changjuan-install-a7f4c2d9.wen-s-0413.chatgpt.site/icon-57.png</string>
+		<key>fullSizeImageURL</key>
+		<string>https://changjuan-install-a7f4c2d9.wen-s-0413.chatgpt.site/icon-512.png</string>
+	</dict>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>stripSwiftSymbols</key>
+	<true/>
+	<key>teamID</key>
+	<string>84PC94U6P2</string>
+	<key>thinning</key>
+	<string>&lt;none&gt;</string>
+</dict>
+</plist>
