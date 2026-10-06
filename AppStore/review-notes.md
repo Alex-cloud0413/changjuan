@@ -1,4 +1,4 @@
-# App Review Notes — Long Scroll 1.1.0 (Build 28)
+# App Review Notes — Long Scroll 1.1.0 (Build 29)
 
 Long Scroll creates a single long image from content that the user explicitly scrolls through on their iPhone.
 
@@ -34,7 +34,9 @@ Rapid jumps, dynamic content and frames without enough shared content may fail a
 
 ## Implementation note
 
-Build 28 supports iOS 27 and later and uses ScreenCaptureKit's `SCContentSharingPicker` and `SCStream` with the screen-capture background mode. Control Center commands use LiveActivityIntent to execute in the app process without requesting foreground presentation. Explicit system permission is always required.
+Build 29 supports iOS 27 and later and uses ScreenCaptureKit's `SCContentSharingPicker` and `SCStream` with the screen-capture background mode. Control Center commands use LiveActivityIntent to execute in the app process without requesting foreground presentation. Explicit system permission is always required.
+
+Build 29 replaces Build 28 for this submission. It preserves capture behavior and the desktop App icon, while increasing the size and stroke thickness of the same three-stroke symbol used by both Control Center controls.
 
 When the user taps Finish, the app seals frame intake, stops the stream, commits the local capture and stitches it under a finite background task. No fixed recording-end wait or destructive tail-frame trim is used.
 

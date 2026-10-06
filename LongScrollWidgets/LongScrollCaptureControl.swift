@@ -12,7 +12,7 @@ struct LongScrollCaptureControl: ControlWidget {
                 Label {
                     Text(controlTitle(for: phase))
                 } icon: {
-                    Image(.longJuanCaptureV2)
+                    Image(.longJuanCaptureV3)
                         .symbolRenderingMode(.monochrome)
                 }
             }
@@ -58,7 +58,7 @@ struct LongScrollPageControl: ControlWidget {
                 Label {
                     Text(phase == .paused ? "继续收卷" : "接下一页")
                 } icon: {
-                    Image(.longJuanCaptureV2)
+                    Image(.longJuanCaptureV3)
                         .symbolRenderingMode(.monochrome)
                 }
             }
