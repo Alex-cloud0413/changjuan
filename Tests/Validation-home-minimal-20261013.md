@@ -39,4 +39,3 @@
 - home-accessibility.png：accessibility-large。
 - usage-guide.png：保留的引导第一步。
 - iphone-home.png：原位更新后的真机首页（iPhone 17 / iOS 27.2）。
-
