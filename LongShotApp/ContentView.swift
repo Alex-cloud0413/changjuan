@@ -12,14 +12,13 @@ enum ScrollPalette {
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
-
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage("longshot.hasCompletedUsageGuide.v1") private var hasCompletedUsageGuide = false
-
-    @State private var showingShareSheet = false
     @State private var showingDeleteConfirmation = false
+    @State private var showingFailureDetails = false
     @State private var showingFullPreview = false
     @State private var showingUsageGuide = false
     @State private var usageGuideIsInitial = false
@@ -28,48 +27,41 @@ struct ContentView: View {
         NavigationStack {
             ZStack {
                 paperBackground
-
-                ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: 26) {
-                        brandHeader
-                        introduction
-                        systemEntryCard
-                        captureAction
-                        statusCard
-                        instructions
-                        privacyNote
+                GeometryReader { geometry in
+                    // Keep ordinary sizes on one screen. Accessibility sizes
+                    // may scroll instead of shrinking or hiding useful text.
+                    if dynamicTypeSize.isAccessibilitySize || (geometry.size.height < 650 && dynamicTypeSize >= .xxLarge) {
+                        ScrollView(showsIndicators: false) {
+                            homeContent(compact: true)
+                                .frame(minHeight: geometry.size.height)
+                        }
+                    } else {
+                        homeContent(compact: geometry.size.height < 650)
+                            .frame(height: geometry.size.height)
                     }
-                    .frame(maxWidth: 560)
-                    .padding(.horizontal, 22)
-                    .padding(.top, 18)
-                    .padding(.bottom, 36)
-                    .frame(maxWidth: .infinity)
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
-            .sheet(isPresented: $showingShareSheet) {
-                ActivityView(items: model.outputURLs)
-            }
             .fullScreenCover(isPresented: fullPreviewBinding) {
                 LongImagePreview(urls: model.outputURLs)
             }
-            .fullScreenCover(
-                isPresented: $showingUsageGuide,
-                onDismiss: completeUsageGuidePresentation
-            ) {
+            .fullScreenCover(isPresented: $showingUsageGuide, onDismiss: completeUsageGuidePresentation) {
                 UsageGuideView(isFirstRun: usageGuideIsInitial) {
                     hasCompletedUsageGuide = true
                     showingUsageGuide = false
                 }
             }
-            .confirmationDialog(
-                "清理这一次的本地记录？",
-                isPresented: $showingDeleteConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button("清理本地记录", role: .destructive) {
-                    model.discardCurrentSession()
+            .alert("这一次没有成卷", isPresented: $showingFailureDetails) {
+                Button("重新整理") { Task { await model.retryProcessing() } }
+                Button("清理后重录", role: .destructive) {
+                    showingDeleteConfirmation = true
                 }
+                Button("关闭", role: .cancel) {}
+            } message: {
+                Text(failureMessage)
+            }
+            .confirmationDialog("清理这一次的本地记录？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+                Button("清理本地记录", role: .destructive) { model.discardCurrentSession() }
                 Button("取消", role: .cancel) {}
             } message: {
                 Text("已经保存到系统照片中的图片不会被删除。")
@@ -78,7 +70,6 @@ struct ContentView: View {
                 if model.isSavedThumbnailPresented,
                    !fullPreviewBinding.wrappedValue,
                    !showingUsageGuide,
-                   !showingShareSheet,
                    let image = model.previewImage {
                     savedThumbnail(image)
                         .padding(.horizontal, 16)
@@ -86,10 +77,7 @@ struct ContentView: View {
                         .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            .animation(
-                reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 1),
-                value: model.isSavedThumbnailPresented
-            )
+            .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 1), value: model.isSavedThumbnailPresented)
         }
         .tint(ScrollPalette.ink)
         .onAppear {
@@ -97,6 +85,56 @@ struct ContentView: View {
             usageGuideIsInitial = true
             showingUsageGuide = true
         }
+    }
+
+    private func homeContent(compact: Bool) -> some View {
+        VStack(spacing: 0) {
+            brandHeader
+            Spacer(minLength: compact ? 12 : 24)
+            VStack(spacing: compact ? 24 : 34) {
+                Text("把滚动，收成一卷")
+                    .font(.largeTitle.weight(.semibold))
+                    .fontDesign(.serif)
+                    .foregroundStyle(ScrollPalette.ink)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(spacing: 12) {
+                    captureAction
+                    if let hint = visibleCaptureHint {
+                        Text(hint)
+                            .font(.footnote)
+                            .foregroundStyle(captureHintColor)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    contextualAction
+                }
+
+                Button {
+                    usageGuideIsInitial = false
+                    showingUsageGuide = true
+                } label: {
+                    Text("查看使用方法")
+                        .font(.callout)
+                        .foregroundStyle(ScrollPalette.secondaryInk)
+                        .frame(minWidth: 144, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("打开三步使用引导，查看控制中心设置和截图方法")
+                .accessibilityIdentifier("home.usageGuide")
+            }
+            .frame(maxWidth: .infinity)
+            Spacer(minLength: compact ? 16 : 32)
+            privacyNote
+        }
+        .frame(maxWidth: 560)
+        .padding(.horizontal, 24)
+        .padding(.top, compact ? 12 : 18)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity)
+        .accessibilityIdentifier("home.singleScreen")
     }
 
     private var fullPreviewBinding: Binding<Bool> {
@@ -111,8 +149,8 @@ struct ContentView: View {
         )
     }
 
-    /// Completion feedback stays above the scrolling page and does not depend
-    /// on notification permission. Closing it never deletes the saved image.
+    /// Newly saved images still offer transient feedback. Historical results
+    /// no longer occupy the home screen; closing this never deletes Photos.
     private func savedThumbnail(_ image: UIImage) -> some View {
         HStack(spacing: 0) {
             Button {
@@ -229,68 +267,6 @@ struct ContentView: View {
             .foregroundStyle(ScrollPalette.secondaryInk)
     }
 
-    private var introduction: some View {
-        VStack(spacing: 12) {
-            CaptureMark()
-                .stroke(
-                    ScrollPalette.ink,
-                    style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
-                )
-                .frame(width: 72, height: 82)
-                .accessibilityHidden(true)
-
-            Text("把滚动，收成一卷")
-                .font(.largeTitle.weight(.semibold))
-                .fontDesign(.serif)
-                .foregroundStyle(ScrollPalette.ink)
-                .multilineTextAlignment(.center)
-
-            Text("确认一次录制，在想停的位置完成。")
-                .font(.body)
-                .foregroundStyle(ScrollPalette.secondaryInk)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 2)
-    }
-
-    private var systemEntryCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("先设置一次，之后快速开始", systemImage: "switch.2")
-                .font(.headline)
-                .foregroundStyle(ScrollPalette.ink)
-
-            Text("在控制中心的编辑页添加「长卷」，也可以把它设为操作按钮。在需要截图的界面轻点控制，确认 Apple 的「Share Entire Screen（共享整个屏幕）」后，等顶部面板收起再滚动。长按灵动岛可重新展开「接下一页／继续」和「完成」，不用返回 App；也可添加「长卷 · 接下一页」控制。")
-                .font(.footnote)
-                .foregroundStyle(ScrollPalette.secondaryInk)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Button {
-                usageGuideIsInitial = false
-                showingUsageGuide = true
-            } label: {
-                Label("重新查看使用方法", systemImage: "questionmark.circle")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .tint(ScrollPalette.ink)
-            .padding(.top, 2)
-
-            Button {
-                guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else { return }
-                UIApplication.shared.open(url)
-            } label: {
-                Label("完成预览提醒设置", systemImage: "bell")
-                    .font(.footnote)
-            }
-            .buttonStyle(.plain)
-            .accessibilityHint("在其他 App 中显示完成提示，需要允许长卷通知和横幅")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .paperPanel()
-    }
-
     private var captureAction: some View {
         Button {
             if case .capturing = model.phase {
@@ -299,28 +275,18 @@ struct ContentView: View {
                 model.beginCapture()
             }
         } label: {
-            VStack(spacing: 11) {
+            VStack(spacing: 14) {
                 ZStack {
                     Circle()
                         .fill(captureButtonColor)
-                        .frame(width: 76, height: 76)
-                        .shadow(
-                            color: ScrollPalette.ink.opacity(reduceTransparency ? 0.06 : 0.14),
-                            radius: 18,
-                            y: 9
-                        )
+                        .frame(width: 88, height: 88)
 
                     captureButtonSymbol
                 }
 
                 Text(captureActionTitle)
-                    .font(.headline)
+                    .font(.title3.weight(.semibold))
                     .foregroundStyle(ScrollPalette.ink)
-
-                Text(captureActionHint)
-                    .font(.footnote)
-                    .foregroundStyle(ScrollPalette.secondaryInk)
-                    .multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
@@ -329,6 +295,7 @@ struct ContentView: View {
         .disabled(model.phase == .choosingSource || model.phase == .processing)
         .accessibilityLabel(captureActionTitle)
         .accessibilityHint(captureActionHint)
+        .accessibilityIdentifier("home.capture")
     }
 
     @ViewBuilder
@@ -346,9 +313,9 @@ struct ContentView: View {
             CaptureMark()
                 .stroke(
                     Color.white,
-                    style: StrokeStyle(lineWidth: 3.6, lineCap: .round, lineJoin: .round)
+                    style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round)
                 )
-                .frame(width: 38, height: 43)
+                .frame(width: 42, height: 48)
         }
     }
 
@@ -385,267 +352,75 @@ struct ContentView: View {
         }
     }
 
-    private var statusCard: some View {
-        Group {
-            statusContent
-                .id(phaseIdentity)
-                .transition(phaseTransition)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .paperPanel()
-        .animation(phaseAnimation, value: phaseIdentity)
-    }
-
     @ViewBuilder
-    private var statusContent: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            switch model.phase {
-            case .idle:
-                statusHeading("准备好了", systemImage: "circle", color: ScrollPalette.success)
-                supportingText("确认共享后先等顶部面板收起再滚动。长按灵动岛，可随时展开接下一页和完成按钮。")
-
-            case .choosingSource:
-                statusHeading("等待你的选择", systemImage: "rectangle.on.rectangle", color: ScrollPalette.ink)
-                supportingText("保持在当前 App，确认共享整个屏幕后先停在原处，等顶部面板收起再滚动。")
-#if !LONGSHOT_SCREEN_CAPTURE_KIT
-                Button("取消本次开始") { model.cancelCaptureChoice() }
-                    .buttonStyle(.bordered)
-#endif
-
-            case .capturing(let frameCount):
-                statusHeading(model.isPageTransitionPaused ? "切换页面中" : "正在收卷", systemImage: model.isPageTransitionPaused ? "pause.circle" : "record.circle", color: ScrollPalette.recording)
-                supportingText(model.isPageTransitionPaused
-                    ? "采集已暂停。切到新页面后，在灵动岛轻点「继续」；切换动画不会进入长图。"
-                    : frameCount == 0
-                    ? "系统录制已连接。请在要截取的页面开始滚动；若从长卷内启动，再切回目标 App。"
-                    : "已收到 " + String(frameCount) + " 个画面。可上下滚动；切换页面前，先在灵动岛点「接下一页」。")
+    private var contextualAction: some View {
+        switch model.phase {
+        case .capturing:
 #if LONGSHOT_SCREEN_CAPTURE_KIT
-                Button(model.isPageTransitionPaused ? "在新页面继续" : "暂停并接下一页") {
-                    Task { await model.togglePageTransition() }
-                }
-                .buttonStyle(.bordered)
+            Button(model.isPageTransitionPaused ? "继续收卷" : "接下一页") {
+                Task { await model.togglePageTransition() }
+            }
+            .font(.callout)
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .accessibilityIdentifier("home.pageTransition")
 #endif
-                Button {
-                    Task { await model.stopCapture() }
-                } label: {
-                    Label("现在结束并生成", systemImage: "stop.fill")
-                }
-                .buttonStyle(.bordered)
-                .tint(ScrollPalette.recording)
-
-            case .processing:
-                HStack(spacing: 13) {
-                    ProgressView()
-                        .tint(ScrollPalette.ink)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("正在整理长卷")
-                            .font(.headline)
-                            .foregroundStyle(ScrollPalette.ink)
-                        supportingText("正在识别重叠内容并保存到照片。")
-                    }
-                }
-
-            case .ready(let pageCount, let accepted, let skipped):
-                statusHeading("已经保存到照片", systemImage: "checkmark.circle", color: ScrollPalette.success)
-                if let image = model.previewImage {
-                    Button {
-                        model.dismissSavedThumbnail()
-                        showingFullPreview = true
-                    } label: {
-                        ZStack(alignment: .bottom) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(maxHeight: 280)
-                                .frame(maxWidth: .infinity)
-                                .background(Color.white.opacity(reduceTransparency ? 1 : 0.78))
-
-                            Label("查看完整长图", systemImage: "arrow.up.left.and.arrow.down.right")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(ScrollPalette.ink.opacity(0.88), in: Capsule())
-                                .padding(12)
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(hairline, lineWidth: 1)
-                        }
-                    }
-                    .buttonStyle(PressScaleButtonStyle())
-                    .accessibilityLabel("查看完整长图")
-                }
-
-                Text(resultSummary(pageCount: pageCount, accepted: accepted, skipped: skipped))
-                    .font(.footnote)
-                    .foregroundStyle(ScrollPalette.secondaryInk)
-
-                resultActions
-
-            case .failed(let message):
-                statusHeading("这一次没有成卷", systemImage: "exclamationmark.triangle", color: ScrollPalette.warning)
-                supportingText(message)
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) { failureActions }
-                    VStack(alignment: .leading, spacing: 10) { failureActions }
-                }
-            }
+        case .failed:
+            Button("查看失败详情") { showingFailureDetails = true }
+                .font(.callout)
+                .frame(minHeight: 44)
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("home.failureDetails")
+        case .idle, .choosingSource, .processing, .ready:
+            EmptyView()
         }
     }
 
-    @ViewBuilder
-    private var resultActions: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                shareButton
-                deleteButton
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                shareButton
-                deleteButton
-            }
+    private var visibleCaptureHint: String? {
+        switch model.phase {
+        case .choosingSource: return "请确认共享整个屏幕"
+        case .capturing:
+            return model.isPageTransitionPaused ? "采集已暂停，切换页面后继续" : "回到目标页面继续滚动"
+        case .processing: return "完成后自动保存到照片"
+        case .failed: return "这一次没有成卷"
+        case .idle, .ready: return nil
         }
     }
 
-    private var shareButton: some View {
-        Button {
-            showingShareSheet = true
-        } label: {
-            Label("分享", systemImage: "square.and.arrow.up")
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(ScrollPalette.ink)
+    private var captureHintColor: Color {
+        if case .failed = model.phase { return ScrollPalette.warning }
+        return ScrollPalette.secondaryInk
     }
 
-    private var deleteButton: some View {
-        Button(role: .destructive) {
-            showingDeleteConfirmation = true
-        } label: {
-            Label("清理记录", systemImage: "trash")
-        }
-        .buttonStyle(.bordered)
-        .tint(ScrollPalette.secondaryInk)
-    }
-
-    @ViewBuilder
-    private var failureActions: some View {
-        Button("重新整理") {
-            Task { await model.retryProcessing() }
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(ScrollPalette.ink)
-
-        Button("清理后重录", role: .destructive) {
-            showingDeleteConfirmation = true
-        }
-        .buttonStyle(.bordered)
-        .tint(ScrollPalette.secondaryInk)
-    }
-
-    private var instructions: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            Text("三步成卷")
-                .font(.title3.weight(.semibold))
-                .fontDesign(.serif)
-                .foregroundStyle(ScrollPalette.ink)
-
-            instructionRow(number: "01", text: "首次在控制中心添加「长卷」，也可以把它设为操作按钮。")
-            instructionDivider
-            instructionRow(number: "02", text: "在目标 App 里确认共享后，先等顶部面板收起，再缓慢向上或向下滚动。")
-            instructionDivider
-            instructionRow(number: "03", text: "长按灵动岛，选择「接下一页／继续」或「完成」；也可用控制中心里的长卷控制。")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .paperPanel()
-    }
-
-    private var instructionDivider: some View {
-        Rectangle()
-            .fill(hairline)
-            .frame(height: 1)
-            .padding(.leading, 41)
+    private var failureMessage: String {
+        if case .failed(let message) = model.phase { return message }
+        return ""
     }
 
     private var privacyNote: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 2) {
             Label(
                 "所有画面只留在这台 iPhone。分享前仍建议检查姓名、头像等隐私信息。",
                 systemImage: "lock"
             )
+            .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 18) {
                 Link("隐私政策", destination: URL(string: "https://changjuan-install-a7f4c2d9.wen-s-0413.chatgpt.site/privacy")!)
+                    .frame(minHeight: 44)
                 Link("使用帮助", destination: URL(string: "https://changjuan-install-a7f4c2d9.wen-s-0413.chatgpt.site/support")!)
+                    .frame(minHeight: 44)
             }
             .fontWeight(.medium)
         }
         .font(.footnote)
         .foregroundStyle(ScrollPalette.secondaryInk)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 4)
+        .accessibilityIdentifier("home.privacy")
     }
 
     private var hairline: Color {
         ScrollPalette.ink.opacity(colorSchemeContrast == .increased ? 0.25 : 0.12)
-    }
-
-    private var phaseIdentity: Int {
-        switch model.phase {
-        case .idle: return 0
-        case .choosingSource: return 1
-        case .capturing: return 2
-        case .processing: return 3
-        case .ready: return 4
-        case .failed: return 5
-        }
-    }
-
-    private var phaseAnimation: Animation? {
-        reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 1)
-    }
-
-    private var phaseTransition: AnyTransition {
-        if reduceMotion {
-            return .opacity
-        }
-        return .opacity.combined(with: .scale(scale: 0.985))
-    }
-
-    private func statusHeading(_ title: String, systemImage: String, color: Color) -> some View {
-        Label(title, systemImage: systemImage)
-            .font(.headline)
-            .foregroundStyle(color)
-    }
-
-    private func supportingText(_ text: String) -> some View {
-        Text(text)
-            .font(.body)
-            .foregroundStyle(ScrollPalette.secondaryInk)
-            .multilineTextAlignment(.leading)
-    }
-
-    private func instructionRow(number: String, text: String) -> some View {
-        HStack(alignment: .top, spacing: 13) {
-            Text(number)
-                .font(.footnote.weight(.semibold))
-                .fontDesign(.serif)
-                .foregroundStyle(ScrollPalette.secondaryInk)
-                .frame(width: 28, alignment: .leading)
-
-            Text(text)
-                .font(.body)
-                .foregroundStyle(ScrollPalette.ink)
-                .multilineTextAlignment(.leading)
-                .layoutPriority(1)
-        }
-    }
-
-    private func resultSummary(pageCount: Int, accepted: Int, skipped: Int) -> String {
-        let pageText = pageCount == 1 ? "1 张长图" : "\(pageCount) 张连续长图"
-        return "生成 \(pageText)，采用 \(accepted) 个有效画面，自动略过 \(skipped) 个重复或模糊画面。"
     }
 
     private func completeUsageGuidePresentation() {
@@ -692,37 +467,6 @@ struct PressScaleButtonStyle: ButtonStyle {
     }
 }
 
-private struct PaperPanelModifier: ViewModifier {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
-
-    func body(content: Content) -> some View {
-        content
-            .padding(19)
-            .background(
-                Color.white.opacity(reduceTransparency ? 1 : 0.72),
-                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(
-                        ScrollPalette.ink.opacity(colorSchemeContrast == .increased ? 0.25 : 0.12),
-                        lineWidth: 1
-                    )
-            }
-            .shadow(
-                color: ScrollPalette.ink.opacity(reduceTransparency ? 0 : 0.035),
-                radius: 16,
-                y: 7
-            )
-    }
-}
-
-private extension View {
-    func paperPanel() -> some View {
-        modifier(PaperPanelModifier())
-    }
-}
 
 private struct LongImagePreview: View {
     let urls: [URL]

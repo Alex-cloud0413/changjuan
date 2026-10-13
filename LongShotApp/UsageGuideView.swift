@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct UsageGuideView: View {
     let isFirstRun: Bool
@@ -216,6 +217,20 @@ struct UsageGuideView: View {
             .buttonBorderShape(.roundedRectangle(radius: 15))
             .controlSize(.large)
             .tint(ScrollPalette.ink)
+
+            if selectedStep == stepCount - 1 {
+                Button {
+                    guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else { return }
+                    UIApplication.shared.open(url)
+                } label: {
+                    Text("通知提醒设置")
+                        .font(.footnote)
+                        .foregroundStyle(ScrollPalette.secondaryInk)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("在其他 App 中显示完成提示，需要允许长卷通知和横幅")
+            }
         }
         .frame(maxWidth: 560)
         .padding(.horizontal, 22)

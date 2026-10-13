@@ -3,6 +3,7 @@ Build/
 Dist/
 DistributionSite/
 DerivedData/
+tmp/
 *.xcarchive
 *.ipa
 *.mobileprovision

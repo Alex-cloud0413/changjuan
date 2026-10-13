@@ -1,4 +1,4 @@
-# App Review Notes — Long Scroll 1.1.0 (Build 29)
+# App Review Notes — Long Scroll 1.1.1 (Build 30)
 
 Long Scroll creates a single long image from content that the user explicitly scrolls through on their iPhone.
 
@@ -7,7 +7,7 @@ Long Scroll creates a single long image from content that the user explicitly sc
 1. Open a scrollable app or page and stop at the desired starting position.
 2. Open Control Center and tap “长卷”. The current app remains visible after Control Center closes.
 3. In Apple’s system-owned panel, select “Share Entire Screen”. Keep the starting position still until the sharing panel and expanded Dynamic Island collapse, then scroll slowly with overlapping content. Scroll downward, upward, or back and forth within the same page; output is ordered by the page's vertical layout.
-4. At the desired endpoint, touch and hold the Dynamic Island to expand it, then tap “完成长卷”; alternatively tap the main Control Center control again.
+4. At the desired endpoint, touch and hold the Dynamic Island to expand it, then tap “完成”; alternatively tap the main Control Center control again.
 5. Grant add-only Photos permission if requested. The stitched image is saved to Photos. When Long Scroll is in the foreground, a tappable floating thumbnail appears in the app; when another app is visible, Long Scroll requests a system completion notification with a preview action. Banner visibility remains subject to iOS notification and Focus settings.
 
 The Control Center control can be added from Control Center’s edit mode by searching for “长卷”. The in-app “开始收卷” button is an alternative entry point and requires switching to the target app after system confirmation.
@@ -34,9 +34,11 @@ Rapid jumps, dynamic content and frames without enough shared content may fail a
 
 ## Implementation note
 
-Build 29 supports iOS 27 and later and uses ScreenCaptureKit's `SCContentSharingPicker` and `SCStream` with the screen-capture background mode. Control Center commands use LiveActivityIntent to execute in the app process without requesting foreground presentation. Explicit system permission is always required.
+Build 30 supports iOS 27 and later and uses ScreenCaptureKit's `SCContentSharingPicker` and `SCStream` with the screen-capture background mode. Control Center commands use LiveActivityIntent to execute in the app process without requesting foreground presentation. Explicit system permission is always required.
 
-Build 29 replaces Build 28 for this submission. It preserves capture behavior and the desktop App icon, while increasing the size and stroke thickness of the same three-stroke symbol used by both Control Center controls.
+Version 1.1.1 simplifies the home screen to a single screen at ordinary text sizes. Tap “查看使用方法” to reopen the three-step guide. Larger accessibility text may scroll rather than truncate. The permanent saved-result card and repeated instructions have been removed, but the transient saved thumbnail, notification preview, failure recovery, capture and page-transition actions remain. The capture pipeline and Control Center symbols are unchanged from the publicly available 1.1.0 (Build 29).
+
+Store screenshots show the current native UI. The control-center and sharing-panel illustrations are part of the app's actual guide. The result preview uses developer-authored offline sample content passed through the production stitcher, with no real user data.
 
 When the user taps Finish, the app seals frame intake, stops the stream, commits the local capture and stitches it under a finite background task. No fixed recording-end wait or destructive tail-frame trim is used.
 
