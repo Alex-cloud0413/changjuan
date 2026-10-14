@@ -12,6 +12,8 @@
 		B00000000000000000000001 /* LongShotApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* LongShotApp.swift */; };
 		B00000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000002 /* ContentView.swift */; };
 		B00000000000000000000003 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* AppModel.swift */; };
+		B00000000000000000000054 /* CaptureProcessingDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000054 /* CaptureProcessingDiagnostics.swift */; };
+		B00000000000000000000055 /* FramePreparationCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000055 /* FramePreparationCache.swift */; };
 		B00000000000000000000005 /* FrameStitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* FrameStitcher.swift */; };
 		B00000000000000000000006 /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000006 /* ActivityView.swift */; };
 		B00000000000000000000007 /* CaptureConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000007 /* CaptureConstants.swift */; };
@@ -30,6 +32,11 @@
 		B00000000000000000000033 /* UsageGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000032 /* UsageGuideView.swift */; };
 		B00000000000000000000040 /* PrivacyInfo.xcprivacy in App Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000040 /* App PrivacyInfo.xcprivacy */; };
 		B00000000000000000000041 /* PrivacyInfo.xcprivacy in Widget Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000041 /* Widget PrivacyInfo.xcprivacy */; };
+		B00000000000000000000042 /* AppLanguage.swift in App Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000042 /* AppLanguage.swift */; };
+		B00000000000000000000043 /* AppLanguage.swift in Widget Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000042 /* AppLanguage.swift */; };
+		B00000000000000000000050 /* Localizable.strings in App Resources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000009 /* Localizable.strings */; };
+		B00000000000000000000051 /* Localizable.strings in Widget Resources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000009 /* Localizable.strings */; };
+		B00000000000000000000052 /* InfoPlist.strings in App Resources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000010 /* InfoPlist.strings */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -61,6 +68,8 @@
 		C00000000000000000000001 /* LongShotApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongShotApp.swift; sourceTree = "<group>"; };
 		C00000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		C00000000000000000000003 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		C00000000000000000000054 /* CaptureProcessingDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureProcessingDiagnostics.swift; sourceTree = "<group>"; };
+		C00000000000000000000055 /* FramePreparationCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FramePreparationCache.swift; sourceTree = "<group>"; };
 		C00000000000000000000005 /* FrameStitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameStitcher.swift; sourceTree = "<group>"; };
 		C00000000000000000000006 /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
 		C00000000000000000000007 /* CaptureConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureConstants.swift; sourceTree = "<group>"; };
@@ -88,6 +97,11 @@
 		C00000000000000000000032 /* UsageGuideView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageGuideView.swift; sourceTree = "<group>"; };
 		C00000000000000000000040 /* App PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		C00000000000000000000041 /* Widget PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		C00000000000000000000042 /* AppLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLanguage.swift; sourceTree = "<group>"; };
+		C00000000000000000000050 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		C00000000000000000000051 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		C00000000000000000000052 /* en InfoPlist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		C00000000000000000000053 /* zh-Hans InfoPlist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,6 +130,8 @@
 				C00000000000000000000001 /* LongShotApp.swift */,
 				C00000000000000000000002 /* ContentView.swift */,
 				C00000000000000000000003 /* AppModel.swift */,
+				C00000000000000000000054 /* CaptureProcessingDiagnostics.swift */,
+				C00000000000000000000055 /* FramePreparationCache.swift */,
 				C00000000000000000000032 /* UsageGuideView.swift */,
 				C00000000000000000000031 /* ResultNotificationManager.swift */,
 				C00000000000000000000025 /* CaptureLiveActivityManager.swift */,
@@ -134,6 +150,9 @@
 			children = (
 				C00000000000000000000030 /* ControlAssets.xcassets */,
 				C00000000000000000000007 /* CaptureConstants.swift */,
+				C00000000000000000000042 /* AppLanguage.swift */,
+				D00000000000000000000009 /* Localizable.strings */,
+				D00000000000000000000010 /* InfoPlist.strings */,
 				C00000000000000000000024 /* CaptureSystemIntegration.swift */,
 				C00000000000000000000008 /* CaptureStorage.swift */,
 				C00000000000000000000009 /* OverlapEstimator.swift */,
@@ -180,6 +199,21 @@
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
+
+/* Begin PBXVariantGroup section */
+		D00000000000000000000009 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (C00000000000000000000050 /* en */, C00000000000000000000051 /* zh-Hans */, );
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000010 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (C00000000000000000000052 /* en InfoPlist */, C00000000000000000000053 /* zh-Hans InfoPlist */, );
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin PBXNativeTarget section */
 		F00000000000000000000001 /* LongShot */ = {
@@ -241,7 +275,7 @@
 			compatibilityVersion = "Xcode 16.0";
 			developmentRegion = zh_CN;
 			hasScannedForEncodings = 0;
-			knownRegions = (zh_CN, Base, );
+			knownRegions = (zh_CN, "zh-Hans", en, Base, );
 			mainGroup = D00000000000000000000001;
 			productRefGroup = D00000000000000000000007 /* Products */;
 			projectDirPath = "";
@@ -254,8 +288,8 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		E00000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000015 /* Assets.xcassets in Resources */, B00000000000000000000030, B00000000000000000000040 /* PrivacyInfo.xcprivacy in App Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
-		E00000000000000000000006 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000031, B00000000000000000000041 /* PrivacyInfo.xcprivacy in Widget Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		E00000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000015 /* Assets.xcassets in Resources */, B00000000000000000000030, B00000000000000000000040 /* PrivacyInfo.xcprivacy in App Resources */, B00000000000000000000050 /* Localizable.strings in App Resources */, B00000000000000000000052 /* InfoPlist.strings in App Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		E00000000000000000000006 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000031, B00000000000000000000041 /* PrivacyInfo.xcprivacy in Widget Resources */, B00000000000000000000051 /* Localizable.strings in Widget Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -266,6 +300,8 @@
 				B00000000000000000000001 /* LongShotApp.swift in Sources */,
 				B00000000000000000000002 /* ContentView.swift in Sources */,
 				B00000000000000000000003 /* AppModel.swift in Sources */,
+				B00000000000000000000054 /* CaptureProcessingDiagnostics.swift in Sources */,
+				B00000000000000000000055 /* FramePreparationCache.swift in Sources */,
 				B00000000000000000000033 /* UsageGuideView.swift in Sources */,
 				B00000000000000000000032 /* ResultNotificationManager.swift in Sources */,
 				B00000000000000000000016 /* ScreenCaptureCoordinator.swift in Sources */,
@@ -273,6 +309,7 @@
 				B00000000000000000000005 /* FrameStitcher.swift in Sources */,
 				B00000000000000000000006 /* ActivityView.swift in Sources */,
 				B00000000000000000000007 /* CaptureConstants.swift in Sources */,
+				B00000000000000000000042 /* AppLanguage.swift in App Sources */,
 				B00000000000000000000017 /* CaptureSystemIntegration.swift in Sources */,
 				B00000000000000000000008 /* CaptureStorage.swift in Sources */,
 				B00000000000000000000009 /* OverlapEstimator.swift in Sources */,
@@ -287,6 +324,7 @@
 				B0000000000000000000001A /* LongScrollCaptureControl.swift in Sources */,
 				B0000000000000000000001B /* LongScrollLiveActivity.swift in Sources */,
 				B0000000000000000000001C /* CaptureSystemIntegration.swift in Sources */,
+				B00000000000000000000043 /* AppLanguage.swift in Widget Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -331,7 +369,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C00000000000000000000013 /* App.xcconfig */;
 			buildSettings = {
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 35;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 1.1.1;
@@ -345,7 +383,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C00000000000000000000013 /* App.xcconfig */;
 			buildSettings = {
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 35;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 1.1.1;
@@ -360,7 +398,7 @@
 			baseConfigurationReference = C0000000000000000000002B /* Widgets.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 35;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
 				MARKETING_VERSION = 1.1.1;
@@ -376,7 +414,7 @@
 			baseConfigurationReference = C0000000000000000000002B /* Widgets.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 35;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
 				MARKETING_VERSION = 1.1.1;

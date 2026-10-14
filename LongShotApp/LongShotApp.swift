@@ -9,6 +9,7 @@ struct LongShotApp: App {
     @StateObject private var model: AppModel
 
     init() {
+        AppLanguage.prepareIfNeeded()
         _model = StateObject(wrappedValue: AppModel.shared)
     }
 
@@ -48,6 +49,7 @@ final class LongShotApplicationDelegate: NSObject, UIApplicationDelegate, UNUser
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        CaptureProcessingDiagnostics.record("appLaunched")
 #if LONGSHOT_BENCHMARK
         if ProcessInfo.processInfo.arguments.contains("--benchmark-latest") {
             Task { await Self.benchmarkLatestSession() }

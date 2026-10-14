@@ -275,21 +275,29 @@ final class ScreenCaptureCoordinator: NSObject {
 
         isStopping = true
         isStarting = false
-        let finishingTask = UIApplication.shared.beginBackgroundTask(withName: "完成屏幕捕获")
-        defer {
-            if finishingTask != .invalid { UIApplication.shared.endBackgroundTask(finishingTask) }
-        }
+        CaptureProcessingDiagnostics.record("captureFinishStarted", values: ["autoStopped": autoStopped])
+        let finishingTask = CaptureProcessingBackgroundTask(name: "完成屏幕捕获", stage: "captureFinish")
+        defer { finishingTask.end() }
+        let drainStartedAt = ProcessInfo.processInfo.systemUptime
         captureQueue.sync {
             // Drain already queued samples before sealing; do not erase any
             // committed tail frames. Later callbacks cannot enter a new session.
             streamGate.invalidate()
             pipeline.sealForFinishing()
         }
+        CaptureProcessingDiagnostics.record("captureQueueDrained", values: [
+            "seconds": ProcessInfo.processInfo.systemUptime - drainStartedAt
+        ])
         let currentStream = stream
         stream = nil
 
         if stopStream, let currentStream {
+            CaptureProcessingDiagnostics.record("streamStopStarted")
+            let streamStopStartedAt = Date()
             try? await currentStream.stopCapture()
+            CaptureProcessingDiagnostics.record("streamStopFinished", values: [
+                "seconds": Date().timeIntervalSince(streamStopStartedAt)
+            ])
         }
 
         let completion = captureQueue.sync {
@@ -557,6 +565,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
     }
 
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
+    private let preprocessor: FramePreprocessor
     private let hostIsForeground: @Sendable () -> Bool
 
     private var sessionURL: URL?
@@ -566,10 +575,11 @@ final class ScreenFramePipeline: @unchecked Sendable {
     private var hasRequestedFinish = false
     private(set) var isPausedForNextPage = false
 
-    init(hostIsForeground: @escaping @Sendable () -> Bool = {
+    init(preprocessor: FramePreprocessor = FramePreprocessor(), hostIsForeground: @escaping @Sendable () -> Bool = {
         ScreenCaptureHostVisibility.shared.isForeground
     }) {
         self.hostIsForeground = hostIsForeground
+        self.preprocessor = preprocessor
     }
 
     var hasActiveSession: Bool {
@@ -631,6 +641,9 @@ final class ScreenFramePipeline: @unchecked Sendable {
                     try CaptureStorage.write(manifest, to: sessionURL)
                 }
                 lastSavedPresentationTime = presentationTime
+                // The full-quality JPEG is already committed. A slow or full
+                // preparation queue never drops capture frames or delays finish.
+                preprocessor.enqueue(data, for: url)
             } catch {
                 let message = error.localizedDescription
                 _ = failSession(with: message)

@@ -12,6 +12,12 @@ struct StoreScreenshotApp: App {
     init() {
         UserDefaults.standard.set(true, forKey: "longshot.hasCompletedUsageGuide.v1")
         let args = ProcessInfo.processInfo.arguments
+        if args.contains("--reset-language") {
+            AppLanguage.defaults.removeObject(forKey: AppLanguage.preferenceKey)
+        } else if let index = args.firstIndex(of: "--language"), args.indices.contains(index + 1),
+           let language = AppLanguage(rawValue: args[index + 1]) {
+            AppLanguage.defaults.set(language.rawValue, forKey: AppLanguage.preferenceKey)
+        }
         mode = args.contains("--guide") ? "guide" : args.contains("--result") ? "result" : "home"
         if mode == "result" {
             do { outputs = try StoreExample.makeResult() }
@@ -31,6 +37,8 @@ struct StoreScreenshotApp: App {
                 }
             }
             .preferredColorScheme(.light)
+            .environment(\.appLanguage, AppLanguage.current)
+            .environment(\.locale, AppLanguage.current.locale)
         }
     }
 }

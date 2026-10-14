@@ -1,0 +1,11 @@
+"长卷" = "Long Scroll";
+"长卷 · 接下一页" = "Long Scroll · Next page";
+"开始长截图，或在到达目标位置后立即完成。" = "Start a long capture, or finish immediately at your endpoint.";
+"收卷时暂停采集，切换页面后再次轻点继续。不会跳回 App。" = "Pause capture, switch pages, then tap again to resume. The app stays in the background.";
+"开始或完成长卷" = "Start or finish Long Scroll";
+"在当前界面请求系统屏幕共享；捕获中再次轻点即可完成。" = "Request screen sharing in the current app. Tap again while capturing to finish.";
+"打开长卷的系统录制确认；捕获中再次轻点即可完成。" = "Open the system capture confirmation. Tap again while capturing to finish.";
+"完成长卷" = "Finish Long Scroll";
+"立即结束捕获并在后台生成长图。" = "End capture immediately and create the long image in the background.";
+"接下一页或继续收卷" = "Next page or resume capture";
+"暂停采集以切换页面，在新页面轻点继续。" = "Pause capture to switch pages, then resume on the new page.";

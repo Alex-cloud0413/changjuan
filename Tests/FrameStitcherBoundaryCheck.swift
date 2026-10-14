@@ -46,6 +46,8 @@ struct FrameStitcherBoundaryCheck {
         try verifyPixelAccurateAlignment(in: directory)
         try verifyBidirectionalAndPageSegments(targetFrames, in: directory)
         try verifyOverlayDetection(in: directory)
+        try verifyPreparedFrameEquivalence(targetFrames, in: directory)
+        try verifyFullSizePreparation(in: directory)
         print("FrameStitcher boundary checks passed; reverse/revisit, segmented pages and overlay recovery included. Fixtures: \(directory.path)")
     }
 
@@ -174,6 +176,56 @@ struct FrameStitcherBoundaryCheck {
         return CGSize(width: image.width, height: image.height)
     }
 
+    private static func verifyPreparedFrameEquivalence(_ frames: [URL], in directory: URL) throws {
+        let extra = [directory.appendingPathComponent("obstructed-start.png"),
+                     directory.appendingPathComponent("unrelated.jpg")]
+        let precision = try FileManager.default.contentsOfDirectory(
+            at: directory.appendingPathComponent("precision-frames"), includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "jpg" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let all = frames + extra + precision
+        let originals = try all.map { try Data(contentsOf: $0) }
+        for (url, data) in zip(all, originals) {
+            try FramePreparationCache.store(FrameStitcher().prepareFrame(at: url, encodedData: data), for: url)
+            require(FramePreparationCache.load(for: url) != nil)
+        }
+
+        func compare(_ sources: [URL], _ name: String, boundaries: [Int] = [], expectedHits: Int? = nil) throws {
+            let baselineDirectory = directory.appendingPathComponent("preparation-\(name)-baseline")
+            let preparedDirectory = directory.appendingPathComponent("preparation-\(name)-cached")
+            let baseline = try FrameStitcher(usePreparedFrames: false).stitch(
+                frameURLs: sources, sessionURL: baselineDirectory, segmentStarts: boundaries
+            )
+            let prepared = try FrameStitcher().stitch(
+                frameURLs: sources, sessionURL: preparedDirectory, segmentStarts: boundaries
+            )
+            require(prepared.preparedFrameCount == (expectedHits ?? sources.count))
+            require(prepared.acceptedFrameCount == baseline.acceptedFrameCount)
+            require(prepared.skippedFrameCount == baseline.skippedFrameCount)
+            require(prepared.outputURLs.count == baseline.outputURLs.count)
+            for (left, right) in zip(baseline.outputURLs, prepared.outputURLs) {
+                require(try Data(contentsOf: left) == Data(contentsOf: right))
+            }
+            print(String(format: "prepared %@: %d/%d hits, output byte-identical; uncached %.4fs cached %.4fs",
+                         name, prepared.preparedFrameCount, sources.count, baseline.timings.total, prepared.timings.total))
+        }
+        try compare(frames, "forward")
+        try compare(Array(frames.reversed()), "reverse")
+        try compare(frames + Array(frames.reversed()) + frames, "revisit")
+        try compare(frames + Array(frames.reversed()) + [frames[0]], "three-pages", boundaries: [0, frames.count, frames.count * 2])
+        try compare([extra[0]] + frames, "overlay-recovery")
+        try compare([extra[1]] + frames + [extra[1]], "unrelated-boundaries")
+        try compare(precision, "one-pixel-alignment")
+
+        // Only disposable fixture caches are corrupted/deleted here. Missing,
+        // partial and stale caches must all fall back without shortening output.
+        try FileManager.default.removeItem(at: FramePreparationCache.cacheURL(for: frames[0]))
+        try Data([0, 1, 2]).write(to: FramePreparationCache.cacheURL(for: frames[1]), options: .atomic)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: frames[2].path)
+        require(FramePreparationCache.load(for: frames[2]) == nil)
+        try compare(frames, "missing-corrupt-stale", expectedHits: frames.count - 3)
+        for (url, original) in zip(all, originals) { require(try Data(contentsOf: url) == original) }
+    }
+
     private static func dumpSelection(_ urls: [URL]) throws {
         let frames = try urls.map { url -> GrayFrame in
             guard let image = UIImage(contentsOfFile: url.path)?.cgImage else { throw CheckError.image }
@@ -204,6 +256,76 @@ struct FrameStitcherBoundaryCheck {
                 emit("edge[\(index - 1)->\(index)]: \(estimate)")
             }
         }
+    }
+
+    private static func verifyFullSizePreparation(in directory: URL) throws {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let width = 1206, height = 2622
+        let top = floor(CGFloat(height) * 0.075)
+        let bottom = CGFloat(height) - ceil(CGFloat(height) * 0.19)
+        let sources = directory.appendingPathComponent("full-size-frames")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+        var random: UInt64 = 0x35a179c4
+        let canvas = UIGraphicsImageRenderer(size: CGSize(width: width, height: 6500), format: format).image { context in
+            for y in stride(from: 0, to: 6500, by: 11) {
+                for x in stride(from: 0, to: width, by: 24) {
+                    random = random &* 6364136223846793005 &+ 1442695040888963407
+                    let shade = CGFloat(40 + ((random >> 32) % 180)) / 255
+                    UIColor(red: shade, green: min(1, shade * 0.86), blue: min(1, shade * 1.1), alpha: 1).setFill()
+                    context.fill(CGRect(x: x, y: y, width: 24, height: 11))
+                }
+            }
+        }
+        var frames: [URL] = []
+        var preparationSeconds: [Double] = []
+        for index in 0..<30 {
+            try autoreleasepool {
+                let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { context in
+                    UIColor.white.setFill()
+                    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+                    context.cgContext.saveGState()
+                    context.cgContext.clip(to: CGRect(x: 0, y: top, width: CGFloat(width), height: bottom - top))
+                    canvas.draw(at: CGPoint(x: 0, y: top - CGFloat(index * 137)))
+                    context.cgContext.restoreGState()
+                }
+                let data = image.jpegData(compressionQuality: 0.9)!
+                let url = CaptureStorage.frameURL(index: index, sessionURL: sources)
+                try data.write(to: url)
+                frames.append(url)
+                let started = ProcessInfo.processInfo.systemUptime
+                try FramePreparationCache.store(FrameStitcher().prepareFrame(at: url, encodedData: data), for: url)
+                preparationSeconds.append(ProcessInfo.processInfo.systemUptime - started)
+            }
+        }
+        let pages = frames + Array(frames.reversed()) + frames
+        let boundaries = [0, frames.count, frames.count * 2]
+#if LONGSHOT_BASELINE_CHECKS
+        let baseline = try LegacyFrameStitcher().stitch(
+            frameURLs: pages, sessionURL: directory.appendingPathComponent("full-size-legacy"), segmentStarts: boundaries
+        )
+#else
+        let baseline = try FrameStitcher(usePreparedFrames: false).stitch(
+            frameURLs: pages, sessionURL: directory.appendingPathComponent("full-size-uncached"), segmentStarts: boundaries
+        )
+#endif
+        let prepared = try FrameStitcher().stitch(
+            frameURLs: pages, sessionURL: directory.appendingPathComponent("full-size-prepared"), segmentStarts: boundaries
+        )
+        require(prepared.preparedFrameCount == pages.count)
+        require(prepared.acceptedFrameCount == baseline.acceptedFrameCount)
+        require(prepared.skippedFrameCount == baseline.skippedFrameCount)
+        require(prepared.outputURLs.count == baseline.outputURLs.count)
+        for (left, right) in zip(baseline.outputURLs, prepared.outputURLs) {
+            require(try Data(contentsOf: left) == Data(contentsOf: right))
+        }
+        let sorted = preparationSeconds.sorted()
+        print(String(format: "full-size 1206x2622, 3 pages, %d frames: original %.4fs prepared %.4fs; sampling %.4f->%.4fs; assembly %.4f->%.4fs; prep median %.4fs p95 %.4fs; %d output(s) byte-identical",
+                     pages.count, baseline.timings.total, prepared.timings.total,
+                     baseline.timings.sampling, prepared.timings.sampling,
+                     baseline.timings.assembly, prepared.timings.assembly,
+                     sorted[sorted.count / 2], sorted[Int(Double(sorted.count) * 0.95)], prepared.outputURLs.count))
     }
 
     private static func emit(_ message: String) {

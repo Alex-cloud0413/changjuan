@@ -17,6 +17,12 @@ struct LongScrollActivityAttributes: ActivityAttributes {
         var phase: CaptureSurfacePhase
         var frameCount: Int
         var pageCount: Int
+        // Optional for compatibility with activities from older builds.
+        var languageCode: String? = nil
+
+        var language: AppLanguage {
+            AppLanguage(rawValue: languageCode ?? "") ?? .chinese
+        }
     }
 
     var sessionID: String

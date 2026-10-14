@@ -17,11 +17,14 @@ struct ContentView: View {
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage("longshot.hasCompletedUsageGuide.v1") private var hasCompletedUsageGuide = false
+    @AppStorage(AppLanguage.preferenceKey, store: AppLanguage.defaults) private var languageCode = AppLanguage.initialLanguage.rawValue
     @State private var showingDeleteConfirmation = false
     @State private var showingFailureDetails = false
     @State private var showingFullPreview = false
     @State private var showingUsageGuide = false
     @State private var usageGuideIsInitial = false
+
+    private var language: AppLanguage { AppLanguage(rawValue: languageCode) ?? AppLanguage.initialLanguage }
 
     var body: some View {
         NavigationStack {
@@ -51,20 +54,20 @@ struct ContentView: View {
                     showingUsageGuide = false
                 }
             }
-            .alert("这一次没有成卷", isPresented: $showingFailureDetails) {
-                Button("重新整理") { Task { await model.retryProcessing() } }
-                Button("清理后重录", role: .destructive) {
+            .alert(language.text("这一次没有成卷"), isPresented: $showingFailureDetails) {
+                Button(language.text("重新整理")) { Task { await model.retryProcessing() } }
+                Button(language.text("清理后重录"), role: .destructive) {
                     showingDeleteConfirmation = true
                 }
-                Button("关闭", role: .cancel) {}
+                Button(language.text("关闭"), role: .cancel) {}
             } message: {
                 Text(failureMessage)
             }
-            .confirmationDialog("清理这一次的本地记录？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
-                Button("清理本地记录", role: .destructive) { model.discardCurrentSession() }
-                Button("取消", role: .cancel) {}
+            .confirmationDialog(language.text("清理这一次的本地记录？"), isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+                Button(language.text("清理本地记录"), role: .destructive) { model.discardCurrentSession() }
+                Button(language.text("取消"), role: .cancel) {}
             } message: {
-                Text("已经保存到系统照片中的图片不会被删除。")
+                Text(language.text("已经保存到系统照片中的图片不会被删除。"))
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if model.isSavedThumbnailPresented,
@@ -80,6 +83,8 @@ struct ContentView: View {
             .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 1), value: model.isSavedThumbnailPresented)
         }
         .tint(ScrollPalette.ink)
+        .environment(\.appLanguage, language)
+        .environment(\.locale, language.locale)
         .onAppear {
             guard !hasCompletedUsageGuide, !showingUsageGuide else { return }
             usageGuideIsInitial = true
@@ -92,13 +97,6 @@ struct ContentView: View {
             brandHeader
             Spacer(minLength: compact ? 12 : 24)
             VStack(spacing: compact ? 24 : 34) {
-                Text("把滚动，收成一卷")
-                    .font(.largeTitle.weight(.semibold))
-                    .fontDesign(.serif)
-                    .foregroundStyle(ScrollPalette.ink)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-
                 VStack(spacing: 12) {
                     captureAction
                     if let hint = visibleCaptureHint {
@@ -115,18 +113,19 @@ struct ContentView: View {
                     usageGuideIsInitial = false
                     showingUsageGuide = true
                 } label: {
-                    Text("查看使用方法")
+                    Text(language.text("查看使用方法"))
                         .font(.callout)
                         .foregroundStyle(ScrollPalette.secondaryInk)
                         .frame(minWidth: 144, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityHint("打开三步使用引导，查看控制中心设置和截图方法")
+                .accessibilityHint(language.text("打开三步使用引导，查看控制中心设置和截图方法"))
                 .accessibilityIdentifier("home.usageGuide")
             }
             .frame(maxWidth: .infinity)
             Spacer(minLength: compact ? 16 : 32)
+            languageControls
         }
         .frame(maxWidth: 560)
         .padding(.horizontal, 24)
@@ -134,6 +133,33 @@ struct ContentView: View {
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity)
         .accessibilityIdentifier("home.singleScreen")
+    }
+
+    private var languageControls: some View {
+        HStack(spacing: 16) {
+            languageButton(.chinese, title: "中文")
+            Spacer(minLength: 0)
+            languageButton(.english, title: "English")
+        }
+        .accessibilityIdentifier("home.languageControls")
+    }
+
+    private func languageButton(_ option: AppLanguage, title: String) -> some View {
+        Button {
+            guard language != option else { return }
+            languageCode = option.rawValue
+            model.refreshLanguagePresentation()
+        } label: {
+            Text(verbatim: title)
+                .font(.callout.weight(language == option ? .semibold : .regular))
+                .foregroundStyle(language == option ? ScrollPalette.ink : ScrollPalette.secondaryInk)
+                .frame(minWidth: 72, minHeight: 44, alignment: option == .chinese ? .leading : .trailing)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(language.text(option == .chinese ? "使用中文" : "使用英文"))
+        .accessibilityAddTraits(language == option ? .isSelected : [])
+        .accessibilityIdentifier(option == .chinese ? "home.language.zh" : "home.language.en")
     }
 
     private var fullPreviewBinding: Binding<Bool> {
@@ -170,10 +196,10 @@ struct ContentView: View {
                         .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("已保存到照片")
+                        Text(language.text("已保存到照片"))
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(ScrollPalette.ink)
-                        Text("轻点预览长图")
+                        Text(language.text("轻点预览长图"))
                             .font(.footnote)
                             .foregroundStyle(ScrollPalette.secondaryInk)
                     }
@@ -185,7 +211,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(PressScaleButtonStyle())
-            .accessibilityLabel("已保存到照片，轻点预览刚刚生成的长图")
+            .accessibilityLabel(language.text("已保存到照片，轻点预览刚刚生成的长图"))
 
             Button {
                 model.dismissSavedThumbnail()
@@ -197,8 +223,8 @@ struct ContentView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("关闭缩略图提示")
-            .accessibilityHint("已保存的长图不会被删除")
+            .accessibilityLabel(language.text("关闭缩略图提示"))
+            .accessibilityHint(language.text("已保存的长图不会被删除"))
         }
         .frame(maxWidth: 380)
         .background {
@@ -252,14 +278,14 @@ struct ContentView: View {
     }
 
     private var brandName: some View {
-        Text("长卷")
+        Text(language.text("长卷"))
             .font(.title2.weight(.semibold))
             .fontDesign(.serif)
             .foregroundStyle(ScrollPalette.ink)
     }
 
     private var brandCaption: some View {
-        Text("LONG SCROLL")
+        Text(verbatim: language == .chinese ? "LONG SCROLL" : "CHANGJUAN")
             .font(.caption2.weight(.medium))
             .fontDesign(.rounded)
             .tracking(2.2)
@@ -283,9 +309,11 @@ struct ContentView: View {
                     captureButtonSymbol
                 }
 
-                Text(captureActionTitle)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(ScrollPalette.ink)
+                if let title = visibleCaptureActionTitle {
+                    Text(title)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(ScrollPalette.ink)
+                }
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
@@ -328,26 +356,37 @@ struct ContentView: View {
     private var captureActionTitle: String {
         switch model.phase {
         case .choosingSource:
-            return "正在打开系统面板"
+            return language.text("正在打开系统面板")
         case .capturing:
-            return "结束并生成"
+            return language.text("结束并生成")
         case .processing:
-            return "正在生成"
+            return language.text("正在生成")
         case .idle, .ready, .failed:
-            return "开始收卷"
+            return language.text("开始收卷")
+        }
+    }
+
+    /// Idle capture stays icon-only; active states retain visible feedback.
+    /// VoiceOver always receives the action title via accessibilityLabel.
+    private var visibleCaptureActionTitle: String? {
+        switch model.phase {
+        case .idle, .ready, .failed:
+            return nil
+        case .choosingSource, .capturing, .processing:
+            return captureActionTitle
         }
     }
 
     private var captureActionHint: String {
         switch model.phase {
         case .choosingSource:
-            return "请在 Apple 面板中确认共享整个屏幕"
+            return language.text("请在 Apple 面板中确认共享整个屏幕")
         case .capturing:
-            return "长按灵动岛，可接下一页、继续或完成；也可使用控制中心的长卷控制"
+            return language.text("长按灵动岛，可接下一页、继续或完成；也可使用控制中心的长卷控制")
         case .processing:
-            return "正在识别重叠内容并保存到照片"
+            return language.text("正在识别重叠内容并保存到照片")
         case .idle, .ready, .failed:
-            return "也可以从控制中心或操作按钮打开"
+            return language.text("也可以从控制中心或操作按钮打开")
         }
     }
 
@@ -356,7 +395,7 @@ struct ContentView: View {
         switch model.phase {
         case .capturing:
 #if LONGSHOT_SCREEN_CAPTURE_KIT
-            Button(model.isPageTransitionPaused ? "继续收卷" : "接下一页") {
+            Button(language.text(model.isPageTransitionPaused ? "继续收卷" : "接下一页")) {
                 Task { await model.togglePageTransition() }
             }
             .font(.callout)
@@ -365,7 +404,7 @@ struct ContentView: View {
             .accessibilityIdentifier("home.pageTransition")
 #endif
         case .failed:
-            Button("查看失败详情") { showingFailureDetails = true }
+            Button(language.text("查看失败详情")) { showingFailureDetails = true }
                 .font(.callout)
                 .frame(minHeight: 44)
                 .buttonStyle(.plain)
@@ -377,11 +416,11 @@ struct ContentView: View {
 
     private var visibleCaptureHint: String? {
         switch model.phase {
-        case .choosingSource: return "请确认共享整个屏幕"
+        case .choosingSource: return language.text("请确认共享整个屏幕")
         case .capturing:
-            return model.isPageTransitionPaused ? "采集已暂停，切换页面后继续" : "回到目标页面继续滚动"
-        case .processing: return "完成后自动保存到照片"
-        case .failed: return "这一次没有成卷"
+            return language.text(model.isPageTransitionPaused ? "采集已暂停，切换页面后继续" : "回到目标页面继续滚动")
+        case .processing: return language.text("完成后自动保存到照片")
+        case .failed: return language.text("这一次没有成卷")
         case .idle, .ready: return nil
         }
     }
@@ -392,7 +431,7 @@ struct ContentView: View {
     }
 
     private var failureMessage: String {
-        if case .failed(let message) = model.phase { return message }
+        if case .failed(let message) = model.phase { return language.text(message) }
         return ""
     }
 
@@ -405,6 +444,17 @@ struct ContentView: View {
             hasCompletedUsageGuide = true
         }
         usageGuideIsInitial = false
+    }
+}
+
+private struct AppLanguageEnvironmentKey: EnvironmentKey {
+    static let defaultValue = AppLanguage.chinese
+}
+
+extension EnvironmentValues {
+    var appLanguage: AppLanguage {
+        get { self[AppLanguageEnvironmentKey.self] }
+        set { self[AppLanguageEnvironmentKey.self] = newValue }
     }
 }
 
@@ -449,6 +499,7 @@ private struct LongImagePreview: View {
     let urls: [URL]
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appLanguage) private var language
     @State private var selectedPage = 0
     @State private var showingShareSheet = false
 
@@ -456,7 +507,7 @@ private struct LongImagePreview: View {
         NavigationStack {
             Group {
                 if urls.isEmpty {
-                    ContentUnavailableView("没有可预览的长图", systemImage: "photo")
+                    ContentUnavailableView(language.text("没有可预览的长图"), systemImage: "photo")
                 } else {
                     TabView(selection: $selectedPage) {
                         ForEach(Array(urls.enumerated()), id: \.offset) { index, url in
@@ -464,7 +515,7 @@ private struct LongImagePreview: View {
                                 ZoomableLongImage(image: image)
                                     .tag(index)
                             } else {
-                                ContentUnavailableView("无法读取这张长图", systemImage: "photo.badge.exclamationmark")
+                                ContentUnavailableView(language.text("无法读取这张长图"), systemImage: "photo.badge.exclamationmark")
                                     .tag(index)
                             }
                         }
@@ -477,13 +528,13 @@ private struct LongImagePreview: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("完成") { dismiss() }
+                    Button(language.text("完成")) { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showingShareSheet = true
                     } label: {
-                        Label("分享", systemImage: "square.and.arrow.up")
+                        Label(language.text("分享"), systemImage: "square.and.arrow.up")
                     }
                     .disabled(urls.isEmpty)
                 }
@@ -495,7 +546,7 @@ private struct LongImagePreview: View {
     }
 
     private var previewTitle: String {
-        urls.count > 1 ? "长图 \(selectedPage + 1) / \(urls.count)" : "长图预览"
+        urls.count > 1 ? language.format("长图 %ld / %ld", selectedPage + 1, urls.count) : language.text("长图预览")
     }
 }
 

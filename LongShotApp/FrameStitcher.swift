@@ -36,6 +36,8 @@ struct StitchResult {
     let acceptedFrameCount: Int
     let skippedFrameCount: Int
     let timings: StitchTimings
+    let preparedFrameCount: Int
+    let preparedAlignmentCount: Int
 }
 
 struct StitchTimings: Codable {
@@ -79,6 +81,11 @@ final class FrameStitcher {
     // every appended slice. The final frame adds this viewport-fixed area once.
     private let bottomInsetRatio: CGFloat = 0.19
     private let maximumOutputHeight: CGFloat = 16_000
+    private let usePreparedFrames: Bool
+
+    init(usePreparedFrames: Bool = true) {
+        self.usePreparedFrames = usePreparedFrames
+    }
 
     func stitch(
         frameURLs: [URL],
@@ -90,9 +97,21 @@ final class FrameStitcher {
         guard !frameURLs.isEmpty else { throw StitchError.notEnoughFrames }
 
         var samples: [FrameSample] = []
+        var preparedFrameCount = 0
+        var preparedAlignmentCount = 0
         samples.reserveCapacity(frameURLs.count)
         for url in frameURLs {
-            samples.append(try autoreleasepool { try sample(url: url) })
+            samples.append(try autoreleasepool {
+                if usePreparedFrames, let prepared = FramePreparationCache.load(for: url) {
+                    preparedFrameCount += 1
+                    return FrameSample(
+                        url: url, imageSize: CGSize(width: prepared.imageWidth, height: prepared.imageHeight),
+                        gray: prepared.gray, coveredTop: CGFloat(prepared.coveredTop),
+                        isSystemPanel: prepared.isSystemPanel
+                    )
+                }
+                return try sample(url: url)
+            })
         }
 
         let sampled = ProcessInfo.processInfo.systemUptime
@@ -116,6 +135,7 @@ final class FrameStitcher {
         var pieces: [Piece] = []
         var usedFrames = Set<Int>()
         var alignmentFrames: [Int: GrayFrame] = [:]
+        var alignmentOrder: [Int] = []
         var analyses: [(indices: [Int], analysis: BidirectionalScrollAnalysis?)] = []
         for range in ranges {
             let indices = range.filter { !samples[$0].isSystemPanel }
@@ -125,8 +145,18 @@ final class FrameStitcher {
 
         func alignmentFrame(at index: Int) throws -> GrayFrame {
             if let cached = alignmentFrames[index] { return cached }
-            let frame = try makeAlignmentGrayFrame(from: samples[index].url)
+            let frame: GrayFrame
+            if usePreparedFrames, let prepared = FramePreparationCache.load(for: samples[index].url) {
+                preparedAlignmentCount += 1
+                frame = prepared.alignment
+            } else {
+                frame = try autoreleasepool { try makeAlignmentGrayFrame(from: samples[index].url) }
+            }
+            // Adjacent matching only needs a few recent fine-grained frames.
+            // Revisited viewports use coarse samples; eviction changes no pixels.
+            if alignmentOrder.count >= 8 { alignmentFrames.removeValue(forKey: alignmentOrder.removeFirst()) }
             alignmentFrames[index] = frame
+            alignmentOrder.append(index)
             return frame
         }
 
@@ -277,7 +307,30 @@ final class FrameStitcher {
                 assembly: assembled - selected,
                 rendering: ProcessInfo.processInfo.systemUptime - assembled,
                 total: ProcessInfo.processInfo.systemUptime - started
-            )
+            ),
+            preparedFrameCount: preparedFrameCount,
+            preparedAlignmentCount: preparedAlignmentCount
+        )
+    }
+
+    /// Use the exact committed JPEG bytes, not the uncompressed capture buffer:
+    /// matching must see the same pixels as the unchanged fallback path.
+    func prepareFrame(at url: URL, encodedData: Data) throws -> PreparedFrame {
+        let identity = try FramePreparationCache.sourceIdentity(for: url)
+        guard identity.bytes == encodedData.count,
+              let image = UIImage(data: encodedData), let cgImage = image.cgImage else {
+            throw StitchError.unreadableFrame(url)
+        }
+        let gray = try makeGrayFrame(from: cgImage)
+        let alignment = try makeAlignmentGrayFrame(from: cgImage)
+        let overlay = CaptureOverlayDetector.inspect(cgImage)
+        return PreparedFrame(
+            version: FramePreparationCache.version, sourceByteCount: identity.bytes,
+            sourceModifiedAt: identity.modifiedAt, imageWidth: cgImage.width, imageHeight: cgImage.height,
+            coarseHeight: gray.height, coarsePixels: Data(gray.pixels),
+            alignmentHeight: alignment.height, alignmentPixels: Data(alignment.pixels),
+            coveredTop: Double(ceil(CGFloat(cgImage.height) * overlay.coveredTopRatio)),
+            isSystemPanel: overlay.isSystemPanel
         )
     }
 
@@ -376,7 +429,10 @@ final class FrameStitcher {
               let cgImage = image.cgImage else {
             throw StitchError.unreadableFrame(url)
         }
+        return try makeAlignmentGrayFrame(from: cgImage)
+    }
 
+    private func makeAlignmentGrayFrame(from cgImage: CGImage) throws -> GrayFrame {
         let sourceWidth = CGFloat(cgImage.width)
         let sourceHeight = CGFloat(cgImage.height)
         let top = floor(sourceHeight * topInsetRatio)

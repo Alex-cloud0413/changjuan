@@ -20,7 +20,7 @@ function replace(path, from, to) {
 }
 replace('LongShotApp/ContentView.swift', 'private struct LongImagePreview:', 'struct LongImagePreview:');
 replace('LongShotApp/UsageGuideView.swift', '@State private var selectedStep = 0',
-  '@State private var selectedStep = Int(ProcessInfo.processInfo.arguments.last ?? "0") ?? 0');
+  '@State private var selectedStep = ProcessInfo.processInfo.arguments.firstIndex(of: "--guide").flatMap { index in\n        let args = ProcessInfo.processInfo.arguments\n        return args.indices.contains(index + 1) ? Int(args[index + 1]) : nil\n    } ?? 0');
 replace('Config/App.xcconfig', 'com.gaoyiming.longshot.private', 'com.gaoyiming.longshot.StorePreview');
 replace('Config/Widgets.xcconfig', 'com.gaoyiming.longshot.private.Widgets', 'com.gaoyiming.longshot.StorePreview.Widgets');
 replace('Config/Shared.xcconfig', 'group.com.gaoyiming.longshot.private', 'group.com.gaoyiming.longshot.StorePreview');

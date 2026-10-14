@@ -23,11 +23,13 @@ struct ScreenFramePipelineCheck {
         try testExplicitFinishWhileHostIsVisible()
         try testEmptyCaptureFails()
         try testExplicitPageTransitions()
+        try testPreparationBackpressurePreservesAllFrames()
+        try testPreparationFailurePreservesAllFrames()
         try benchmarkFullSizeFrames()
 #if LONGSHOT_SCK_METADATA_STUB
-        print("ScreenFramePipeline JPEG/queue checks passed (6); SCK metadata/stream unavailable and excluded on this runtime.")
+        print("ScreenFramePipeline JPEG/queue checks passed (8); SCK metadata/stream unavailable and excluded on this runtime.")
 #else
-        print("ScreenFramePipeline checks passed (6)")
+        print("ScreenFramePipeline checks passed (8)")
 #endif
         print("Fixtures: \(directory.path)")
     }
@@ -131,6 +133,53 @@ struct ScreenFramePipelineCheck {
         let median = sorted[sorted.count / 2]
         let p95 = sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))]
         print(String(format: "1206x2622 frames=16; JPEG+write median=%.4fs p95=%.4fs max=%.4fs; sealed manifest finish=%.4fs", median, p95, sorted.last!, finish))
+    }
+
+    private static func testPreparationBackpressurePreservesAllFrames() throws {
+        let blocked = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        let preprocessor = FramePreprocessor { data, url in
+            entered.signal()
+            _ = blocked.wait(timeout: .now() + 5)
+            try FramePreparationCache.store(FrameStitcher().prepareFrame(at: url, encodedData: data), for: url)
+        }
+        let pipeline = ScreenFramePipeline(preprocessor: preprocessor, hostIsForeground: { false })
+        let firstSession = try pipeline.beginSession(topCropRatio: 0.075)
+        _ = pipeline.consume(try makeSample(index: 0))
+        require(entered.wait(timeout: .now() + 5) == .success)
+        for index in 1..<12 {
+            guard case .progress(index + 1) = pipeline.consume(try makeSample(index: index)) else {
+                fatalError("A full preparation queue must never discard a recorded frame")
+            }
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        pipeline.sealForFinishing()
+        let completion = pipeline.finishSession(autoStopped: false, trimTrailingFrames: false)
+        require(ProcessInfo.processInfo.systemUptime - started < 0.5)
+        require(completion?.manifest.frameCount == 12)
+        require(try CaptureStorage.frameURLs(in: firstSession).count == 12)
+        // A new session may start while the old preparation job still runs.
+        let secondSession = try pipeline.beginSession(topCropRatio: 0.075)
+        _ = pipeline.consume(try makeSample(index: 0))
+        _ = pipeline.finishSession(autoStopped: false, trimTrailingFrames: false)
+        blocked.signal(); blocked.signal()
+        preprocessor.waitForTesting()
+        require(FramePreparationCache.load(for: CaptureStorage.frameURL(index: 0, sessionURL: firstSession)) != nil)
+        require(FramePreparationCache.load(for: CaptureStorage.frameURL(index: 1, sessionURL: firstSession)) != nil)
+        require(FramePreparationCache.load(for: CaptureStorage.frameURL(index: 2, sessionURL: firstSession)) == nil)
+        require(FramePreparationCache.load(for: CaptureStorage.frameURL(index: 0, sessionURL: secondSession)) == nil)
+    }
+
+    private static func testPreparationFailurePreservesAllFrames() throws {
+        let preprocessor = FramePreprocessor { _, _ in throw CheckError.sample }
+        let pipeline = ScreenFramePipeline(preprocessor: preprocessor, hostIsForeground: { false })
+        let session = try pipeline.beginSession(topCropRatio: 0.075)
+        for index in 0..<6 { _ = pipeline.consume(try makeSample(index: index)) }
+        let completion = pipeline.finishSession(autoStopped: false, trimTrailingFrames: false)
+        preprocessor.waitForTesting()
+        require(completion?.manifest.state == .complete)
+        require(completion?.manifest.frameCount == 6)
+        require(try CaptureStorage.frameURLs(in: session).count == 6)
     }
 
     private static func makeSample(index: Int, width: Int = 120, height: Int = 260) throws -> CMSampleBuffer {

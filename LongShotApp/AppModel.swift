@@ -38,11 +38,23 @@ final class AppModel: ObservableObject {
     private let savedResultPresentationStore = SavedResultPresentationStore()
     private var thumbnailSessionID: String?
     private var explicitPreviewSessionID: String?
-    private var processingBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var processingBackgroundTask: CaptureProcessingBackgroundTask?
     private var finishRequest: (sessionID: String, date: Date)?
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
+        for (notification, event) in [
+            (UIApplication.didBecomeActiveNotification, "appBecameActive"),
+            (UIApplication.willResignActiveNotification, "appWillResignActive"),
+            (UIApplication.didEnterBackgroundNotification, "appEnteredBackground"),
+            (UIApplication.willEnterForegroundNotification, "appWillEnterForeground")
+        ] {
+            NotificationCenter.default.publisher(for: notification)
+                .sink { _ in
+                    Task { @MainActor in CaptureProcessingDiagnostics.record(event) }
+                }
+                .store(in: &cancellables)
+        }
         NotificationCenter.default.publisher(for: CaptureCommandStore.startRequested)
             .sink { [weak self] _ in
                 Task { @MainActor in
@@ -143,6 +155,7 @@ final class AppModel: ObservableObject {
     func stopCapture() async {
         if captureCoordinator.isCapturing, let sessionID = activeSessionURL?.lastPathComponent {
             finishRequest = (sessionID, Date())
+            CaptureProcessingDiagnostics.record("finishRequested", sessionID: sessionID)
         }
         await captureCoordinator.stopCapture()
     }
@@ -177,6 +190,7 @@ final class AppModel: ObservableObject {
             }
 
             activeSessionURL = latest.url
+            CaptureProcessingDiagnostics.sessionID = latest.manifest.id
             lastCaptureDate = latest.manifest.startedAt
 
             switch latest.manifest.state {
@@ -188,16 +202,16 @@ final class AppModel: ObservableObject {
                 let existing = CaptureStorage.existingOutputs(in: latest.url)
                 if !existing.isEmpty {
                     let newlySaved = !CaptureStorage.hasSavedOutputsToPhotos(in: latest.url)
+                    var recoveryTiming: [String: Any] = ["recoveredExistingOutput": true]
                     if newlySaved {
                         guard processingSessionID != latest.manifest.id else { return }
                         processingSessionID = latest.manifest.id
                         phase = .processing
                         updateSystemState(.processing, frameCount: latest.manifest.frameCount)
-                        let backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "恢复保存长卷")
-                        defer {
-                            if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask) }
-                        }
-                        try await saveToPhotos(existing)
+                        let backgroundTask = CaptureProcessingBackgroundTask(name: "恢复保存长卷", stage: "recovery")
+                        defer { backgroundTask.end() }
+                        CaptureProcessingDiagnostics.record("recoveringExistingOutput", values: ["outputCount": existing.count])
+                        recoveryTiming.merge(try await saveToPhotos(existing, sessionID: latest.manifest.id)) { _, new in new }
                         try CaptureStorage.markOutputsSavedToPhotos(in: latest.url)
                     }
                     var updatedManifest = latest.manifest
@@ -208,7 +222,7 @@ final class AppModel: ObservableObject {
                     try CaptureStorage.write(updatedManifest, to: latest.url)
                     if newlySaved {
                         await completeSavedResult(
-                            urls: existing, sessionURL: latest.url, manifest: updatedManifest
+                            urls: existing, sessionURL: latest.url, manifest: updatedManifest, timing: recoveryTiming
                         )
                     } else if explicitPreviewSessionID == nil {
                         restoreSavedResult(urls: existing, sessionURL: latest.url, manifest: updatedManifest)
@@ -307,28 +321,56 @@ final class AppModel: ObservableObject {
     }
 
     private func process(sessionURL: URL, manifest: CaptureManifest) async {
+        let processingStartedAt = Date()
+        CaptureProcessingDiagnostics.sessionID = manifest.id
+        CaptureProcessingDiagnostics.record("processingStarted", values: [
+            "frameCount": manifest.frameCount,
+            "inputPageCount": max(1, manifest.segmentStarts?.count ?? 1),
+            "captureStoppedToProcessingSeconds": manifest.completedAt.map { processingStartedAt.timeIntervalSince($0) } ?? 0
+        ])
         phase = .processing
         updateSystemState(.processing, frameCount: manifest.frameCount)
         liveActivityManager.markProcessing(frameCount: manifest.frameCount)
         beginProcessingProtection()
         let backgroundTask = processingBackgroundTask
-        processingBackgroundTask = .invalid
-        defer {
-            if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask) }
-        }
+        processingBackgroundTask = nil
+        defer { backgroundTask?.end() }
 
         do {
             let frames = try CaptureStorage.frameURLs(in: sessionURL)
-            let result = try await Task.detached(priority: .userInitiated) {
-                try FrameStitcher().stitch(
+            CaptureProcessingDiagnostics.record("stitchingQueued", values: ["frameCount": frames.count])
+            let queuedAt = ProcessInfo.processInfo.systemUptime
+            let work = try await Task.detached(priority: .userInitiated) {
+                let startedAt = ProcessInfo.processInfo.systemUptime
+                let result = try FrameStitcher().stitch(
                     frameURLs: frames,
                     sessionURL: sessionURL,
                     topCropRatio: manifest.topCropRatio ?? 0.075,
                     segmentStarts: manifest.segmentStarts ?? []
                 )
+                return (result, startedAt, ProcessInfo.processInfo.systemUptime)
             }.value
+            let result = work.0
+            var timing: [String: Any] = [
+                "stitchDispatchDelaySeconds": work.1 - queuedAt,
+                "stitchReturnDelaySeconds": ProcessInfo.processInfo.systemUptime - work.2,
+                "preparedFrameCount": result.preparedFrameCount,
+                "fallbackFrameCount": frames.count - result.preparedFrameCount,
+                "preparedAlignmentCount": result.preparedAlignmentCount,
+                "processingStartedAt": ISO8601DateFormatter().string(from: processingStartedAt)
+            ]
+            CaptureProcessingDiagnostics.record("stitchingFinished", values: timing.merging([
+                "stitchingSeconds": result.timings.total,
+                "samplingSeconds": result.timings.sampling,
+                "selectionSeconds": result.timings.selection,
+                "assemblySeconds": result.timings.assembly,
+                "renderingSeconds": result.timings.rendering,
+                "outputCount": result.outputURLs.count
+            ]) { _, new in new })
 
-            try await saveToPhotos(result.outputURLs)
+            let photosTiming = try await saveToPhotos(result.outputURLs, sessionID: manifest.id)
+            timing.merge(photosTiming) { _, new in new }
+            let persistenceStartedAt = Date()
             try CaptureStorage.markOutputsSavedToPhotos(in: sessionURL)
             var updatedManifest = manifest
             updatedManifest.state = .complete
@@ -343,10 +385,16 @@ final class AppModel: ObservableObject {
             updatedManifest.assemblySeconds = result.timings.assembly
             updatedManifest.renderingSeconds = result.timings.rendering
             try CaptureStorage.write(updatedManifest, to: sessionURL)
+            timing["resultPersistenceSeconds"] = Date().timeIntervalSince(persistenceStartedAt)
+            timing["processingWallSeconds"] = Date().timeIntervalSince(processingStartedAt)
             await completeSavedResult(
-                urls: result.outputURLs, sessionURL: sessionURL, manifest: updatedManifest
+                urls: result.outputURLs, sessionURL: sessionURL, manifest: updatedManifest, timing: timing
             )
         } catch {
+            let diagnosticError = error as NSError
+            CaptureProcessingDiagnostics.record("processingFailed", sessionID: manifest.id, values: [
+                "errorDomain": diagnosticError.domain, "errorCode": diagnosticError.code
+            ])
             var failedManifest = manifest
             failedManifest.completedAt = Date()
             failedManifest.state = .failed
@@ -372,14 +420,17 @@ final class AppModel: ObservableObject {
     }
 
     private func beginProcessingProtection() {
-        guard processingBackgroundTask == .invalid else { return }
-        processingBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "生成长卷")
+        guard processingBackgroundTask == nil else { return }
+        processingBackgroundTask = CaptureProcessingBackgroundTask(name: "生成长卷", stage: "processing")
     }
 
     /// Both a fresh stitch and an interrupted save recovered on activation use
     /// this path. Presentation/notification failures never undo a Photos save.
-    private func completeSavedResult(urls: [URL], sessionURL: URL, manifest: CaptureManifest) async {
-        recordCompletionTiming(manifest)
+    private func completeSavedResult(
+        urls: [URL], sessionURL: URL, manifest: CaptureManifest, timing: [String: Any] = [:]
+    ) async {
+        recordCompletionTiming(manifest, stages: timing)
+        CaptureProcessingDiagnostics.record("resultSaved", sessionID: manifest.id, values: timing)
         savedResultPresentationStore.enqueue(sessionID: manifest.id)
         if explicitPreviewSessionID == nil || explicitPreviewSessionID == manifest.id {
             restoreSavedResult(urls: urls, sessionURL: sessionURL, manifest: manifest)
@@ -390,27 +441,37 @@ final class AppModel: ObservableObject {
         liveActivityManager.markSaved(pageCount: urls.count)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         exportCaptureDiagnostics()
+        CaptureProcessingDiagnostics.record("resultNotificationStarted", sessionID: manifest.id)
         await resultNotificationManager.postSavedResult(
             image: urls.first.flatMap { UIImage(contentsOfFile: $0.path) },
             sessionURL: sessionURL,
             sessionID: manifest.id,
             pageCount: urls.count
         )
+        CaptureProcessingDiagnostics.record("resultNotificationFinished", sessionID: manifest.id)
     }
 
-    private func recordCompletionTiming(_ manifest: CaptureManifest) {
-        var timing: [String: Any] = [
+    private func recordCompletionTiming(_ manifest: CaptureManifest, stages: [String: Any]) {
+        var timing = CaptureProcessingDiagnostics.buildMetadata.merging(stages) { _, new in new }
+        timing.merge([
+            "schemaVersion": 2,
             "sessionID": manifest.id,
             "savedAt": ISO8601DateFormatter().string(from: Date()),
             "frameCount": manifest.frameCount,
+            "inputPageCount": max(1, manifest.segmentStarts?.count ?? 1),
             "stitchingSeconds": manifest.processingSeconds ?? 0
-        ]
+        ]) { _, new in new }
         if let sampling = manifest.samplingSeconds { timing["samplingSeconds"] = sampling }
         if let selection = manifest.selectionSeconds { timing["selectionSeconds"] = selection }
         if let assembly = manifest.assemblySeconds { timing["assemblySeconds"] = assembly }
         if let rendering = manifest.renderingSeconds { timing["renderingSeconds"] = rendering }
         if let finishRequest, finishRequest.sessionID == manifest.id {
             timing["finishToSavedSeconds"] = Date().timeIntervalSince(finishRequest.date)
+        }
+        // Available even after a system stop or a process restart, unlike the
+        // in-memory finishRequest. This includes background suspension time.
+        if let stoppedAt = manifest.completedAt {
+            timing["captureStoppedToSavedSeconds"] = Date().timeIntervalSince(stoppedAt)
         }
         let destination = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("LongShotCompletionTiming.json")
@@ -515,6 +576,13 @@ final class AppModel: ObservableObject {
         } catch { /* Diagnostics must not interrupt capturing. */ }
     }
 
+    /// Presentation-only refresh. Never starts, stops or resets a session.
+    func refreshLanguagePresentation() {
+        liveActivityManager.refreshLanguage()
+        ControlCenter.shared.reloadControls(ofKind: CaptureSystem.controlKind)
+        ControlCenter.shared.reloadControls(ofKind: CaptureSystem.pageControlKind)
+    }
+
     private func updateSystemState(
         _ state: CaptureSurfacePhase,
         frameCount: Int = 0
@@ -528,13 +596,22 @@ final class AppModel: ObservableObject {
         ControlCenter.shared.reloadControls(ofKind: CaptureSystem.pageControlKind)
     }
 
-    private func saveToPhotos(_ urls: [URL]) async throws {
+    @discardableResult
+    private func saveToPhotos(_ urls: [URL], sessionID: String) async throws -> [String: Any] {
+        let authorizationStartedAt = Date()
+        CaptureProcessingDiagnostics.record("photosAuthorizationStarted", sessionID: sessionID)
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        let authorizationSeconds = Date().timeIntervalSince(authorizationStartedAt)
+        CaptureProcessingDiagnostics.record("photosAuthorizationFinished", sessionID: sessionID, values: [
+            "seconds": authorizationSeconds, "authorizationStatus": status.rawValue
+        ])
         guard status == .authorized || status == .limited else {
             throw PhotoSaveError.permissionDenied
         }
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        CaptureProcessingDiagnostics.record("photosWriteStarted", sessionID: sessionID, values: ["outputCount": urls.count])
+        let writeStartedAt = Date()
+        let callbackAt: Date = try await withCheckedThrowingContinuation { continuation in
             PHPhotoLibrary.shared().performChanges {
                 for url in urls {
                     PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: url)
@@ -543,12 +620,19 @@ final class AppModel: ObservableObject {
                 if let error {
                     continuation.resume(throwing: error)
                 } else if success {
-                    continuation.resume()
+                    continuation.resume(returning: Date())
                 } else {
                     continuation.resume(throwing: PhotoSaveError.unknown)
                 }
             }
         }
+        let timing: [String: Any] = [
+            "photosAuthorizationSeconds": authorizationSeconds,
+            "photosWriteSeconds": callbackAt.timeIntervalSince(writeStartedAt),
+            "photosCallbackResumeSeconds": Date().timeIntervalSince(callbackAt)
+        ]
+        CaptureProcessingDiagnostics.record("photosWriteFinished", sessionID: sessionID, values: timing)
+        return timing
     }
 }
 
@@ -568,6 +652,8 @@ extension AppModel: ScreenCaptureCoordinatorDelegate {
         didStartSessionAt sessionURL: URL
     ) {
         activeSessionURL = sessionURL
+        CaptureProcessingDiagnostics.sessionID = sessionURL.lastPathComponent
+        CaptureProcessingDiagnostics.record("captureStarted")
         lastCaptureDate = Date()
         phase = .capturing(0)
         isPageTransitionPaused = false
@@ -590,6 +676,8 @@ extension AppModel: ScreenCaptureCoordinatorDelegate {
         manifest: CaptureManifest
     ) {
         activeSessionURL = sessionURL
+        CaptureProcessingDiagnostics.sessionID = manifest.id
+        CaptureProcessingDiagnostics.record("captureStopped", values: ["frameCount": manifest.frameCount])
         lastCaptureDate = manifest.startedAt
         isPageTransitionPaused = false
 

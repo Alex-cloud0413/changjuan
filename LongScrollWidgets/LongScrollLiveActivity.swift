@@ -53,7 +53,7 @@ struct LongScrollLiveActivity: Widget {
             } compactTrailing: {
                 Text(shortStatus(for: context.state))
                     .font(.caption2.monospacedDigit())
-                    .accessibilityLabel("长按灵动岛，显示接下一页、继续和完成按钮")
+                    .accessibilityLabel(context.state.language.text("长按灵动岛，显示接下一页、继续和完成按钮"))
             } minimal: {
                 Image(systemName: statusSymbol(for: context.state.phase))
                     .foregroundStyle(statusColor(for: context.state.phase))
@@ -68,19 +68,19 @@ struct LongScrollLiveActivity: Widget {
     ) -> String {
         switch state.phase {
         case .idle:
-            return "长卷"
+            return state.language.text("长卷")
         case .choosing:
-            return "等待系统选择"
+            return state.language.text("等待系统选择")
         case .capturing:
-            return "正在收卷"
+            return state.language.text("正在收卷")
         case .paused:
-            return "切换页面中"
+            return state.language.text("切换页面中")
         case .processing:
-            return "正在生成长图"
+            return state.language.text("正在生成长图")
         case .saved:
-            return "已保存到照片"
+            return state.language.text("已保存到照片")
         case .failed:
-            return "这一次没有成卷"
+            return state.language.text("这一次没有成卷")
         }
     }
 
@@ -89,19 +89,19 @@ struct LongScrollLiveActivity: Widget {
     ) -> String {
         switch state.phase {
         case .idle:
-            return "从控制中心打开"
+            return state.language.text("从控制中心打开")
         case .choosing:
-            return "请确认长卷录制"
+            return state.language.text("请确认长卷录制")
         case .capturing:
-            return "到达目标位置后轻点完成"
+            return state.language.text("到达目标位置后轻点完成")
         case .paused:
-            return "采集已暂停，切到新页面后轻点继续"
+            return state.language.text("采集已暂停，切到新页面后轻点继续")
         case .processing:
-            return "可继续使用其他 App"
+            return state.language.text("可继续使用其他 App")
         case .saved:
-            return state.pageCount > 1 ? "已生成 \(state.pageCount) 张图片" : "长图已经可以使用"
+            return state.pageCount > 1 ? state.language.format("已生成 %ld 张图片", state.pageCount) : state.language.text("长图已经可以使用")
         case .failed:
-            return "打开长卷查看原因"
+            return state.language.text("打开长卷查看原因")
         }
     }
 
@@ -110,19 +110,19 @@ struct LongScrollLiveActivity: Widget {
     ) -> String {
         switch state.phase {
         case .capturing:
-            return "长按操作"
+            return state.language.text("长按操作")
         case .paused:
-            return "长按继续"
+            return state.language.text("长按继续")
         case .processing:
-            return "整理中"
+            return state.language.text("整理中")
         case .saved:
-            return "已保存"
+            return state.language.text("已保存")
         case .failed:
-            return "失败"
+            return state.language.text("失败")
         case .idle:
-            return "就绪"
+            return state.language.text("就绪")
         case .choosing:
-            return "等待中"
+            return state.language.text("等待中")
         }
     }
 
@@ -178,12 +178,12 @@ struct CaptureIslandRow: View {
                 }
             }
             if state.phase == .capturing {
-                Text("等面板收起再滚动 · 长按灵动岛接页")
+                Text(state.language.text("等面板收起再滚动 · 长按灵动岛接页"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else if state.phase == .paused {
-                Text("切换页面后点继续，再等面板收起滚动")
+                Text(state.language.text("切换页面后点继续，再等面板收起滚动"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -196,7 +196,7 @@ struct CaptureIslandRow: View {
             Image(systemName: state.phase == .paused ? "pause.circle.fill" : "record.circle.fill")
                 .foregroundStyle(ActivityPalette.recording)
                 .accessibilityHidden(true)
-            Text(state.phase == .paused ? "暂停" : "长卷")
+            Text(state.language.text(state.phase == .paused ? "暂停" : "长卷"))
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
         }
@@ -206,9 +206,9 @@ struct CaptureIslandRow: View {
     @ViewBuilder
     private var actions: some View {
         if state.phase == .capturing || state.phase == .paused {
-            CaptureActivityActions(paused: state.phase == .paused)
+            CaptureActivityActions(paused: state.phase == .paused, language: state.language)
         } else {
-            Text(state.phase == .saved ? "已保存" : state.phase == .failed ? "失败" : "整理中")
+            Text(state.language.text(state.phase == .saved ? "已保存" : state.phase == .failed ? "失败" : "整理中"))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -217,11 +217,12 @@ struct CaptureIslandRow: View {
 
 private struct CaptureActivityActions: View {
     let paused: Bool
+    let language: AppLanguage
 
     var body: some View {
         HStack(spacing: 8) {
             Button(intent: NextLongScrollPageIntent()) {
-                Text(paused ? "继续" : "接下一页")
+                Text(language.text(paused ? "继续" : "接下一页"))
                     .font(.subheadline.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 8)
@@ -229,10 +230,10 @@ private struct CaptureActivityActions: View {
             }
             .buttonStyle(.bordered)
             .tint(.gray)
-            .accessibilityLabel(paused ? "在新页面继续收卷" : "暂停收卷，接下一页")
+            .accessibilityLabel(language.text(paused ? "在新页面继续收卷" : "暂停收卷，接下一页"))
 
             Button(intent: FinishLongScrollIntent()) {
-                Text("完成")
+                Text(language.text("完成"))
                     .font(.subheadline.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 10)
@@ -240,7 +241,7 @@ private struct CaptureActivityActions: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(ActivityPalette.recording)
-            .accessibilityLabel("完成长卷并保存到照片")
+            .accessibilityLabel(language.text("完成长卷并保存到照片"))
         }
     }
 }

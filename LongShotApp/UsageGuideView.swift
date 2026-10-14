@@ -7,6 +7,7 @@ struct UsageGuideView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.appLanguage) private var language
     @State private var selectedStep = 0
 
     private let stepCount = 3
@@ -55,14 +56,14 @@ struct UsageGuideView: View {
                     )
                     .frame(width: 25, height: 29)
 
-                Text("长卷")
+                Text(language.text("长卷"))
                     .font(.headline)
                     .fontDesign(.serif)
             }
 
             Spacer()
 
-            Button(isFirstRun ? "跳过" : "关闭", action: onDismiss)
+            Button(language.text(isFirstRun ? "跳过" : "关闭"), action: onDismiss)
                 .font(.subheadline.weight(.medium))
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.capsule)
@@ -82,7 +83,7 @@ struct UsageGuideView: View {
             instructions: [
                 "从屏幕右上角向下轻扫，打开控制中心。",
                 "长按空白处或轻点左上角「＋」进入编辑，再轻点「添加控制」。",
-                "搜索「长卷」，轻点三笔标志把它加入控制中心。"
+                "搜索「长卷」或「Long Scroll」，轻点三笔标志把它加入控制中心。"
             ],
             accessibilityLabel: "控制中心设置示意图，显示长卷三笔标志和添加控制按钮"
         )
@@ -113,7 +114,7 @@ struct UsageGuideView: View {
             instructions: [
                 "可以向上、向下或来回缓慢滚动，长卷会按页面上下顺序去重拼接。",
                 "长按顶部灵动岛即可重新展开操作。要切换页面，先点「接下一页」暂停，切换后长按灵动岛再点「继续」。",
-                "也可在控制中心添加「长卷 · 接下一页」，通过该控制直接暂停或继续，不用返回长卷。",
+                "也可添加「长卷 · 接下一页」（Long Scroll · Next page）控制，直接暂停或继续，不用返回长卷。",
                 "到达想要的终点，长按灵动岛后点「完成」，或再次点控制中心里的「长卷」。",
                 "保存后，长卷内会浮出缩略图，轻点查看完整长图；在其他 App 中的提醒需要允许通知。"
             ],
@@ -132,19 +133,19 @@ struct UsageGuideView: View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 22) {
                 VStack(spacing: 9) {
-                    Text(eyebrow)
+                    Text(language.text(eyebrow))
                         .font(.caption.weight(.semibold))
                         .fontDesign(.rounded)
                         .tracking(0.8)
                         .foregroundStyle(ScrollPalette.secondaryInk)
 
-                    Text(title)
+                    Text(language.text(title))
                         .font(.largeTitle.weight(.semibold))
                         .fontDesign(.serif)
                         .foregroundStyle(ScrollPalette.ink)
                         .multilineTextAlignment(.center)
 
-                    Text(summary)
+                    Text(language.text(summary))
                         .font(.body)
                         .foregroundStyle(ScrollPalette.secondaryInk)
                         .multilineTextAlignment(.center)
@@ -153,11 +154,11 @@ struct UsageGuideView: View {
 
                 illustration
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(accessibilityLabel)
+                    .accessibilityLabel(language.text(accessibilityLabel))
 
                 VStack(alignment: .leading, spacing: 14) {
                     ForEach(Array(instructions.enumerated()), id: \.offset) { index, instruction in
-                        GuideInstructionRow(number: index + 1, text: instruction)
+                        GuideInstructionRow(number: index + 1, text: language.text(instruction))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -194,7 +195,7 @@ struct UsageGuideView: View {
                 }
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("第 \(selectedStep + 1) 步，共 \(stepCount) 步")
+            .accessibilityLabel(language.format("第 %ld 步，共 %ld 步", selectedStep + 1, stepCount))
 
             Button {
                 if selectedStep == stepCount - 1 {
@@ -206,7 +207,7 @@ struct UsageGuideView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Text(selectedStep == stepCount - 1 ? "我会用了" : "下一步")
+                    Text(language.text(selectedStep == stepCount - 1 ? "我会用了" : "下一步"))
                     Image(systemName: selectedStep == stepCount - 1 ? "checkmark" : "arrow.right")
                 }
                 .font(.headline)
@@ -218,19 +219,28 @@ struct UsageGuideView: View {
             .controlSize(.large)
             .tint(ScrollPalette.ink)
 
-            if selectedStep == stepCount - 1 {
-                Button {
-                    guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else { return }
-                    UIApplication.shared.open(url)
-                } label: {
-                    Text("通知提醒设置")
-                        .font(.footnote)
-                        .foregroundStyle(ScrollPalette.secondaryInk)
+            HStack(spacing: 22) {
+                if selectedStep == stepCount - 1 {
+                    Button {
+                        guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else { return }
+                        UIApplication.shared.open(url)
+                    } label: {
+                        Text(language.text("通知提醒设置"))
+                            .frame(minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint(language.text("在其他 App 中显示完成提示，需要允许长卷通知和横幅"))
+                }
+
+                Link(destination: URL(string: "https://changjuan-install-a7f4c2d9.wen-s-0413.chatgpt.site/privacy")!) {
+                    Text(language.text("隐私政策"))
                         .frame(minHeight: 44)
                 }
-                .buttonStyle(.plain)
-                .accessibilityHint("在其他 App 中显示完成提示，需要允许长卷通知和横幅")
+                .accessibilityIdentifier("usageGuide.privacyPolicy")
+                .accessibilityHint(language.text("打开长卷的隐私政策网页"))
             }
+            .font(.footnote)
+            .foregroundStyle(ScrollPalette.secondaryInk)
         }
         .frame(maxWidth: 560)
         .padding(.horizontal, 22)
@@ -268,6 +278,7 @@ private struct GuideInstructionRow: View {
 }
 
 private struct ControlCenterSetupIllustration: View {
+    @Environment(\.appLanguage) private var language
     var body: some View {
         ZStack(alignment: .topTrailing) {
             RoundedRectangle(cornerRadius: 30, style: .continuous)
@@ -298,10 +309,10 @@ private struct ControlCenterSetupIllustration: View {
                     }
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("长卷")
+                        Text(language.text("长卷"))
                             .font(.headline)
                             .fontDesign(.serif)
-                        Text("截取滚动内容")
+                        Text(language.text("截取滚动内容"))
                             .font(.caption)
                             .foregroundStyle(ScrollPalette.secondaryInk)
                     }
@@ -315,7 +326,7 @@ private struct ControlCenterSetupIllustration: View {
                 .padding(13)
                 .background(ScrollPalette.paper, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-                Label("添加控制", systemImage: "plus")
+                Label(language.text("添加控制"), systemImage: "plus")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 11)
@@ -347,6 +358,7 @@ private struct ControlCenterSetupIllustration: View {
 }
 
 private struct StartCaptureIllustration: View {
+    @Environment(\.appLanguage) private var language
     var body: some View {
         ZStack(alignment: .bottom) {
             RoundedRectangle(cornerRadius: 30, style: .continuous)
@@ -378,7 +390,7 @@ private struct StartCaptureIllustration: View {
                     .fill(ScrollPalette.ink.opacity(0.14))
                     .frame(width: 38, height: 5)
 
-                Text("开始屏幕录制")
+                Text(language.text("开始屏幕录制"))
                     .font(.headline)
                     .foregroundStyle(ScrollPalette.ink)
 
@@ -391,7 +403,7 @@ private struct StartCaptureIllustration: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Share Entire Screen")
                             .font(.subheadline.weight(.semibold))
-                        Text("仅在设备上整理画面")
+                        Text(language.text("仅在设备上整理画面"))
                             .font(.caption)
                             .foregroundStyle(ScrollPalette.secondaryInk)
                     }
@@ -415,6 +427,7 @@ private struct StartCaptureIllustration: View {
 }
 
 private struct FinishCaptureIllustration: View {
+    @Environment(\.appLanguage) private var language
     var body: some View {
         ZStack(alignment: .top) {
             RoundedRectangle(cornerRadius: 30, style: .continuous)
@@ -444,7 +457,7 @@ private struct FinishCaptureIllustration: View {
                 Circle()
                     .fill(ScrollPalette.recording)
                     .frame(width: 8, height: 8)
-                Text("完成")
+                Text(language.text("完成"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white)
             }

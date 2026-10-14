@@ -5,6 +5,7 @@ import Foundation
 final class CaptureLiveActivityManager {
     private var activity: Activity<LongScrollActivityAttributes>?
     private var lastReportedFrameCount = -1
+    private var latestState: LongScrollActivityAttributes.ContentState?
 
     func start(sessionID: String) {
         lastReportedFrameCount = -1
@@ -20,8 +21,10 @@ final class CaptureLiveActivityManager {
         let state = LongScrollActivityAttributes.ContentState(
             phase: .capturing,
             frameCount: 0,
-            pageCount: 0
+            pageCount: 0,
+            languageCode: AppLanguage.current.rawValue
         )
+        latestState = state
 
         do {
             activity = try Activity.request(
@@ -56,6 +59,15 @@ final class CaptureLiveActivityManager {
         finish(phase: .failed, pageCount: 0, after: 8)
     }
 
+    func refreshLanguage() {
+        guard let activity, var state = latestState else { return }
+        state.languageCode = AppLanguage.current.rawValue
+        latestState = state
+        Task {
+            await activity.update(ActivityContent(state: state, staleDate: nil))
+        }
+    }
+
     private func update(
         phase: CaptureSurfacePhase,
         frameCount: Int = 0,
@@ -65,8 +77,10 @@ final class CaptureLiveActivityManager {
         let state = LongScrollActivityAttributes.ContentState(
             phase: phase,
             frameCount: frameCount,
-            pageCount: pageCount
+            pageCount: pageCount,
+            languageCode: AppLanguage.current.rawValue
         )
+        latestState = state
         Task {
             await activity.update(ActivityContent(state: state, staleDate: nil))
         }
@@ -81,9 +95,11 @@ final class CaptureLiveActivityManager {
         let state = LongScrollActivityAttributes.ContentState(
             phase: phase,
             frameCount: max(lastReportedFrameCount, 0),
-            pageCount: pageCount
+            pageCount: pageCount,
+            languageCode: AppLanguage.current.rawValue
         )
         self.activity = nil
+        latestState = nil
         Task {
             await activity.end(
                 ActivityContent(state: state, staleDate: nil),

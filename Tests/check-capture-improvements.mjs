@@ -36,13 +36,27 @@ const last = source.indexOf("\n#else\n/// ScreenCaptureKit is device-only", firs
 if (first < 0 || last < 0) throw new Error("Cannot extract the production serial pipeline");
 const extracted = join(work, "ProductionScreenFramePipeline.swift");
 writeFileSync(extracted, "import CoreImage\nimport CoreMedia\nimport Foundation\nimport ImageIO\nimport UIKit\n" + source.slice(first, last));
-const pipeline = compile("pipeline", [shared("CaptureConstants.swift"), shared("CaptureStorage.swift"), extracted,
+const pipeline = compile("pipeline", [shared("CaptureConstants.swift"), shared("CaptureStorage.swift"),
+  shared("OverlapEstimator.swift"), app("FrameStitcher.swift"), app("FramePreparationCache.swift"), extracted,
   join(testDirectory, "ScreenFramePipelineCheck.swift")], ["-D", "LONGSHOT_CAPTURE_CHECKS", "-D", "LONGSHOT_SCK_METADATA_STUB"]);
 run("xcrun", ["simctl", "spawn", simulator, pipeline]);
+const baselineSources = [];
+const baselineFlags = [];
+if (process.env.LONGSHOT_STITCH_BASELINE) {
+  const legacy = readFileSync(process.env.LONGSHOT_STITCH_BASELINE, "utf8").replace(
+    /\b(FrameStitcher|StitchError|StitchResult|StitchTimings|CaptureOverlayDetector)\b/g, name => `Legacy${name}`
+  );
+  const legacyFile = join(work, "LegacyFrameStitcher.swift");
+  writeFileSync(legacyFile, legacy);
+  baselineSources.push(legacyFile);
+  baselineFlags.push("-D", "LONGSHOT_BASELINE_CHECKS");
+}
 const stitcher = compile("stitcher", [shared("CaptureConstants.swift"), shared("CaptureStorage.swift"),
-  shared("OverlapEstimator.swift"), app("FrameStitcher.swift"), join(testDirectory, "FrameStitcherBoundaryCheck.swift")]);
+  shared("OverlapEstimator.swift"), app("FrameStitcher.swift"), app("FramePreparationCache.swift"),
+  ...baselineSources, join(testDirectory, "FrameStitcherBoundaryCheck.swift")],
+  ["-D", "LONGSHOT_CAPTURE_CHECKS", ...baselineFlags]);
 run("xcrun", ["simctl", "spawn", simulator, stitcher, "--nonperiodic", ...(process.argv[3] ? [process.argv[3]] : [])]);
-const visual = compile("visual", [shared("CaptureSystemIntegration.swift"),
+const visual = compile("visual", [shared("AppLanguage.swift"), shared("CaptureSystemIntegration.swift"),
   join(project, "LongScrollWidgets", "LongScrollLiveActivity.swift"), join(testDirectory, "CaptureActivityVisualCheck.swift")],
   ["-D", "LONGSHOT_SCREEN_CAPTURE_KIT"]);
 run("xcrun", ["simctl", "spawn", simulator, visual, work]);

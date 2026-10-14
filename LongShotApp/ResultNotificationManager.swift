@@ -132,8 +132,9 @@ final class ResultNotificationManager {
         }
 
         let content = UNMutableNotificationContent()
-        content.title = pageCount > 1 ? "长卷已保存为 \(pageCount) 张长图" : "长卷已保存"
-        content.body = "轻点预览刚刚生成的长图"
+        let language = AppLanguage.current
+        content.title = pageCount > 1 ? language.format("长卷已保存为 %ld 张长图", pageCount) : language.text("长卷已保存")
+        content.body = language.text("轻点预览刚刚生成的长图")
         content.threadIdentifier = "longshot-results"
         content.userInfo = [Self.sessionIDKey: sessionID]
 

@@ -24,13 +24,13 @@ struct LongScrollCaptureControl: ControlWidget {
     private func controlTitle(for phase: CaptureSurfacePhase) -> String {
         switch phase {
         case .capturing, .paused:
-            return "完成长卷"
+            return AppLanguage.current.text("完成长卷")
         case .choosing:
-            return "等待选择"
+            return AppLanguage.current.text("等待选择")
         case .processing:
-            return "正在生成"
+            return AppLanguage.current.text("正在生成")
         case .idle, .saved, .failed:
-            return "开始长卷"
+            return AppLanguage.current.text("开始长卷")
         }
     }
 
@@ -56,7 +56,7 @@ struct LongScrollPageControl: ControlWidget {
         ) { phase in
             ControlWidgetButton(action: NextLongScrollPageIntent()) {
                 Label {
-                    Text(phase == .paused ? "继续收卷" : "接下一页")
+                    Text(AppLanguage.current.text(phase == .paused ? "继续收卷" : "接下一页"))
                 } icon: {
                     Image(.longJuanCaptureV3)
                         .symbolRenderingMode(.monochrome)
