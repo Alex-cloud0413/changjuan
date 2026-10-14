@@ -127,7 +127,6 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity)
             Spacer(minLength: compact ? 16 : 32)
-            privacyNote
         }
         .frame(maxWidth: 560)
         .padding(.horizontal, 24)
@@ -395,28 +394,6 @@ struct ContentView: View {
     private var failureMessage: String {
         if case .failed(let message) = model.phase { return message }
         return ""
-    }
-
-    private var privacyNote: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Label(
-                "所有画面只留在这台 iPhone。分享前仍建议检查姓名、头像等隐私信息。",
-                systemImage: "lock"
-            )
-            .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 18) {
-                Link("隐私政策", destination: URL(string: "https://changjuan-install-a7f4c2d9.wen-s-0413.chatgpt.site/privacy")!)
-                    .frame(minHeight: 44)
-                Link("使用帮助", destination: URL(string: "https://changjuan-install-a7f4c2d9.wen-s-0413.chatgpt.site/support")!)
-                    .frame(minHeight: 44)
-            }
-            .fontWeight(.medium)
-        }
-        .font(.footnote)
-        .foregroundStyle(ScrollPalette.secondaryInk)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityIdentifier("home.privacy")
     }
 
     private var hairline: Color {
