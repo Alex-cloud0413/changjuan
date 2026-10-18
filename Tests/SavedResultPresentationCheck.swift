@@ -9,7 +9,8 @@ struct SavedResultPresentationCheck {
         testOpeningOlderNotificationKeepsNewResultPending()
         testNewSaveReplacesUnseenOlderResult()
         try testReceiptSurvivesModelRelaunch()
-        print("Saved result presentation checks passed (6)")
+        testPruningDoesNotSuppressLatestUpgradePreview()
+        print("Saved result presentation checks passed (7)")
     }
 
     private static func testSaveCanWaitForActivation() {
@@ -73,6 +74,21 @@ struct SavedResultPresentationCheck {
         let encoded = try JSONEncoder().encode(nextLaunch.state)
         let decoded = try JSONDecoder().decode(SavedResultPresentationState.self, from: encoded)
         require(decoded == nextLaunch.state)
+    }
+
+    private static func testPruningDoesNotSuppressLatestUpgradePreview() {
+        let defaults = UserDefaults(suiteName: "LongShotCleanupPresentation.\(UUID().uuidString)")!
+        let store = SavedResultPresentationStore(defaults: defaults)
+        store.forget(sessionID: "old-deleted")
+        require(!store.state.hasConsideredExistingResult)
+        store.considerExistingResult(sessionID: "latest-kept")
+        store.forget(sessionID: "another-deleted")
+        require(store.state.pendingSessionID == "latest-kept")
+        store.forget(sessionID: "latest-kept")
+        require(store.state.pendingSessionID == nil)
+        store.acknowledge(sessionID: "viewed")
+        store.forget(sessionID: "viewed")
+        require(store.state.acknowledgedSessionID == nil)
     }
 
     private static func require(_ condition: Bool, file: StaticString = #file, line: UInt = #line) {

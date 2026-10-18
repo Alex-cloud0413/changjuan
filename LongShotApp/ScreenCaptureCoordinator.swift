@@ -586,12 +586,14 @@ final class ScreenFramePipeline: @unchecked Sendable {
         sessionURL != nil
     }
 
-    func beginSession(topCropRatio: Double) throws -> URL {
+    func beginSession(topCropRatio: Double, options: CaptureOptions = CaptureOptions.load()) throws -> URL {
         let session = try CaptureStorage.createSession()
         sessionURL = session.0
         manifest = session.1
         manifest?.topCropRatio = topCropRatio
         manifest?.segmentStarts = [0]
+        manifest?.captureOptions = options
+        if let manifest { try CaptureStorage.write(manifest, to: session.0) }
         frameIndex = 0
         lastSavedPresentationTime = nil
         hasRequestedFinish = false
@@ -643,7 +645,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
                 lastSavedPresentationTime = presentationTime
                 // The full-quality JPEG is already committed. A slow or full
                 // preparation queue never drops capture frames or delays finish.
-                preprocessor.enqueue(data, for: url)
+                preprocessor.enqueue(data, for: url, options: manifest?.captureOptions ?? CaptureOptions())
             } catch {
                 let message = error.localizedDescription
                 _ = failSession(with: message)

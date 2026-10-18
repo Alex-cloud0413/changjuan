@@ -24,6 +24,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var isSavedPreviewRequested = false
     @Published private(set) var isSavedThumbnailPresented = false
     @Published private(set) var isPageTransitionPaused = false
+    @Published var isSavedPreviewUnavailable = false
+    @Published private(set) var isClearingCaches = false
 
     private lazy var captureCoordinator: ScreenCaptureCoordinator = {
         let coordinator = ScreenCaptureCoordinator()
@@ -40,6 +42,10 @@ final class AppModel: ObservableObject {
     private var explicitPreviewSessionID: String?
     private var processingBackgroundTask: CaptureProcessingBackgroundTask?
     private var finishRequest: (sessionID: String, date: Date)?
+    private var storageMaintenanceTask: Task<Void, Never>?
+    private var storageMaintenanceWorker: Task<SavedCaptureCleanup.Report, Never>?
+    private var storageMaintenanceRequested = false
+    private var resultDeliverySessions: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
@@ -84,6 +90,9 @@ final class AppModel: ObservableObject {
         if await handlePendingFinishRequest() {
             return
         }
+        // Run on every idle activation, including the first launch after upgrade.
+        // Old saved sessions are retired before recovery can select them.
+        if !isBusy { scheduleStorageMaintenance() }
         await refreshAndProcessIfNeeded()
         handlePendingStartRequest()
         restorePendingSavedThumbnailIfNeeded()
@@ -138,7 +147,9 @@ final class AppModel: ObservableObject {
 #if LONGSHOT_SCREEN_CAPTURE_KIT
         updateHostVisibility()
 #endif
-        dismissSavedThumbnail()
+        dismissSavedThumbnail(scheduleCleanup: false)
+        storageMaintenanceWorker?.cancel()
+        storageMaintenanceRequested = false
         explicitPreviewSessionID = nil
         isSavedPreviewRequested = false
         outputURLs = []
@@ -172,6 +183,8 @@ final class AppModel: ObservableObject {
     }
 
     func refreshAndProcessIfNeeded() async {
+        await waitForStorageMaintenance()
+        guard !isClearingCaches else { return }
         // A notification may select an older result during cold launch. Scene
         // activation must not replace that explicit selection with the latest.
         guard explicitPreviewSessionID == nil else { return }
@@ -183,7 +196,10 @@ final class AppModel: ObservableObject {
         }
 
         do {
-            guard let latest = try CaptureStorage.allSessions().first else {
+            guard let latest = try CaptureStorage.allSessions().first(where: {
+                !CaptureStorage.hasDiscardedRawFrames(in: $0.url)
+                    || ($0.manifest.state == .complete && !CaptureStorage.existingOutputs(in: $0.url).isEmpty)
+            }) else {
                 phase = .idle
                 updateSystemState(.idle)
                 return
@@ -229,6 +245,15 @@ final class AppModel: ObservableObject {
                     }
                     return
                 }
+                if CaptureStorage.hasSavedOutputsToPhotos(in: latest.url) {
+                    // Never regenerate or save a duplicate Photos asset when a
+                    // previously saved preview has gone missing.
+                    outputURLs = []
+                    previewImage = nil
+                    phase = .idle
+                    updateSystemState(.idle)
+                    return
+                }
                 guard processingSessionID != latest.manifest.id else { return }
                 processingSessionID = latest.manifest.id
                 await process(sessionURL: latest.url, manifest: latest.manifest)
@@ -240,7 +265,10 @@ final class AppModel: ObservableObject {
     }
 
     func retryProcessing() async {
+        await waitForStorageMaintenance()
+        guard !isBusy else { return }
         guard let activeSessionURL,
+              !CaptureStorage.hasDiscardedRawFrames(in: activeSessionURL),
               let manifest = try? CaptureStorage.readManifest(at: activeSessionURL) else { return }
         processingSessionID = nil
         await process(sessionURL: activeSessionURL, manifest: manifest)
@@ -268,14 +296,16 @@ final class AppModel: ObservableObject {
     }
 
     func presentSavedPreview(sessionID: String?) async {
+        await waitForStorageMaintenance()
+        guard !isBusy else { return }
         do {
             let sessions = try CaptureStorage.allSessions()
             let selected = sessionID.map { requestedID in
                 sessions.first { $0.manifest.id == requestedID }
             } ?? sessions.first
-            guard let selected else { return }
+            guard let selected else { isSavedPreviewUnavailable = true; return }
             let existing = CaptureStorage.existingOutputs(in: selected.url)
-            guard !existing.isEmpty else { return }
+            guard !existing.isEmpty else { isSavedPreviewUnavailable = true; return }
 
             explicitPreviewSessionID = selected.manifest.id
             savedResultPresentationStore.acknowledge(sessionID: selected.manifest.id)
@@ -292,6 +322,7 @@ final class AppModel: ObservableObject {
         isSavedPreviewRequested = false
         explicitPreviewSessionID = nil
         restorePendingSavedThumbnailIfNeeded()
+        scheduleStorageMaintenance()
     }
 
     func openSavedThumbnail() {
@@ -303,21 +334,46 @@ final class AppModel: ObservableObject {
         isSavedPreviewRequested = true
     }
 
-    func dismissSavedThumbnail() {
+    func dismissSavedThumbnail(scheduleCleanup: Bool = true) {
         if let thumbnailSessionID {
             savedResultPresentationStore.acknowledge(sessionID: thumbnailSessionID)
         }
         isSavedThumbnailPresented = false
         thumbnailSessionID = nil
+        if scheduleCleanup { scheduleStorageMaintenance() }
     }
 
     var isBusy: Bool {
+        if isClearingCaches { return true }
         switch phase {
         case .choosingSource, .capturing, .processing:
             return true
         case .idle, .ready, .failed:
             return false
         }
+    }
+
+    func clearAllRawCaches() async -> SavedCaptureCleanup.Report? {
+        guard !isBusy else { return nil }
+        isClearingCaches = true
+        defer { isClearingCaches = false }
+        await waitForStorageMaintenance()
+        let protection = CaptureProcessingBackgroundTask(name: "清理录制缓存", stage: "manualCacheCleanup")
+        defer { protection.end() }
+        let report = await Task.detached(priority: .utility) { SavedCaptureCleanup.clearAllRawCaches() }.value
+        if let activeSessionURL, report.clearedRawSessionIDs.contains(activeSessionURL.lastPathComponent),
+           case .failed = phase {
+            self.activeSessionURL = nil
+            outputURLs = []
+            previewImage = nil
+            phase = .idle
+            updateSystemState(.idle)
+        }
+        CaptureProcessingDiagnostics.record("manualCacheCleanupFinished", values: [
+            "reclaimedBytes": report.reclaimedBytes, "failures": report.failures,
+            "clearedSessionCount": report.clearedRawSessionIDs.count
+        ])
+        return report
     }
 
     private func process(sessionURL: URL, manifest: CaptureManifest) async {
@@ -342,7 +398,7 @@ final class AppModel: ObservableObject {
             let queuedAt = ProcessInfo.processInfo.systemUptime
             let work = try await Task.detached(priority: .userInitiated) {
                 let startedAt = ProcessInfo.processInfo.systemUptime
-                let result = try FrameStitcher().stitch(
+                let result = try FrameStitcher(options: manifest.captureOptions ?? CaptureOptions()).stitch(
                     frameURLs: frames,
                     sessionURL: sessionURL,
                     topCropRatio: manifest.topCropRatio ?? 0.075,
@@ -429,6 +485,7 @@ final class AppModel: ObservableObject {
     private func completeSavedResult(
         urls: [URL], sessionURL: URL, manifest: CaptureManifest, timing: [String: Any] = [:]
     ) async {
+        resultDeliverySessions.insert(manifest.id)
         recordCompletionTiming(manifest, stages: timing)
         CaptureProcessingDiagnostics.record("resultSaved", sessionID: manifest.id, values: timing)
         savedResultPresentationStore.enqueue(sessionID: manifest.id)
@@ -449,6 +506,61 @@ final class AppModel: ObservableObject {
             pageCount: urls.count
         )
         CaptureProcessingDiagnostics.record("resultNotificationFinished", sessionID: manifest.id)
+        resultDeliverySessions.remove(manifest.id)
+        // Saving, feedback and notification delivery are already finished. Cleanup
+        // runs off the main actor and never extends the measured stitching time.
+        scheduleStorageMaintenance()
+    }
+
+    private func scheduleStorageMaintenance() {
+        guard !isBusy else { return }
+        guard storageMaintenanceTask == nil else {
+            storageMaintenanceRequested = true
+            return
+        }
+        storageMaintenanceRequested = false
+        let protectedIDs = Set([explicitPreviewSessionID, thumbnailSessionID].compactMap { $0 })
+            .union(resultDeliverySessions)
+        let protection = CaptureProcessingBackgroundTask(name: "清理已保存画面", stage: "storageCleanup")
+        let worker = Task.detached(priority: .utility) {
+            SavedCaptureCleanup.run(protectedSessionIDs: protectedIDs)
+        }
+        storageMaintenanceWorker = worker
+        storageMaintenanceTask = Task { [weak self] in
+            defer { protection.end() }
+            let report = await worker.value
+            guard let self else { return }
+            for id in report.removedSessionIDs {
+                self.savedResultPresentationStore.forget(sessionID: id)
+                self.resultNotificationManager.removeExpiredResult(sessionID: id)
+            }
+            // A new capture may have started while the disk worker was running.
+            // Do not change its phase, active session or preview state.
+            if !self.isBusy, let active = self.activeSessionURL,
+               report.removedSessionIDs.contains(active.lastPathComponent) {
+                self.activeSessionURL = nil
+                self.outputURLs = []
+                self.previewImage = nil
+                self.lastCaptureDate = nil
+                self.phase = .idle
+                self.updateSystemState(.idle)
+            }
+            CaptureProcessingDiagnostics.record("storageCleanupFinished", values: [
+                "reclaimedBytes": report.reclaimedBytes,
+                "removedSessionCount": report.removedSessionIDs.count,
+                "retainedPreviewCount": report.retainedCount,
+                "retainedPreviewBytes": report.retainedBytes,
+                "failures": report.failures,
+                "cancelled": report.cancelled
+            ])
+            self.storageMaintenanceWorker = nil
+            self.storageMaintenanceTask = nil
+            if self.storageMaintenanceRequested { self.scheduleStorageMaintenance() }
+        }
+    }
+
+    private func waitForStorageMaintenance() async {
+        while let task = storageMaintenanceTask { await task.value }
     }
 
     private func recordCompletionTiming(_ manifest: CaptureManifest, stages: [String: Any]) {
@@ -508,6 +620,7 @@ final class AppModel: ObservableObject {
     }
 
     private func deliverDeferredResultNotificationIfNeeded() async {
+        await waitForStorageMaintenance()
         guard UIApplication.shared.applicationState == .active, !isBusy,
               let sessionID = resultNotificationManager.pendingSessionID else { return }
         guard let sessions = try? CaptureStorage.allSessions(),
@@ -520,10 +633,13 @@ final class AppModel: ObservableObject {
             resultNotificationManager.clearPending(sessionID: sessionID)
             return
         }
+        resultDeliverySessions.insert(sessionID)
         await resultNotificationManager.postSavedResult(
             image: UIImage(contentsOfFile: existing[0].path),
             sessionURL: selected.url, sessionID: sessionID, pageCount: existing.count
         )
+        resultDeliverySessions.remove(sessionID)
+        scheduleStorageMaintenance()
     }
 
     private func presentFailure(_ message: String) {

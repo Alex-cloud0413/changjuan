@@ -99,7 +99,7 @@ struct UsageGuideView: View {
                 "先打开要截取的内容，停在想要的起点。",
                 "打开控制中心，轻点「长卷」。",
                 "控制中心收起后，当前 App 保持不变；轻点 Apple 面板中的「Share Entire Screen（共享整个屏幕）」。",
-                "先等顶部展开的灵动岛面板与系统共享提示收起，再缓慢向上或向下滚动；等待时停在原处，不要先滑走。"
+                "先等灵动岛面板与系统共享提示收起，再沿设置中的拼接方向缓慢滚动；等待时停在原处。"
             ],
             accessibilityLabel: "Apple 录制确认面板示意图，突出显示共享整个屏幕"
         )
@@ -108,11 +108,11 @@ struct UsageGuideView: View {
     private var finishCaptureStep: some View {
         guidePage(
             eyebrow: "第 3 步 · 到哪里停在哪里",
-            title: "上下滚动，轻点完成",
+            title: "滚动内容，轻点完成",
             summary: "不用等待固定倒计时；确认完成后，长卷会立即整理并保存到照片。",
             illustration: AnyView(FinishCaptureIllustration()),
             instructions: [
-                "可以向上、向下或来回缓慢滚动，长卷会按页面上下顺序去重拼接。",
+                "纵向模式可上下往返，横向模式可左右往返。请保持同一方向轴，长卷会按内容顺序去重拼接。",
                 "长按顶部灵动岛即可重新展开操作。要切换页面，先点「接下一页」暂停，切换后长按灵动岛再点「继续」。",
                 "也可添加「长卷 · 接下一页」（Long Scroll · Next page）控制，直接暂停或继续，不用返回长卷。",
                 "到达想要的终点，长按灵动岛后点「完成」，或再次点控制中心里的「长卷」。",

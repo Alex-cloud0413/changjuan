@@ -174,6 +174,13 @@ final class ResultNotificationManager {
         }
     }
 
+    func removeExpiredResult(sessionID: String) {
+        clearPending(sessionID: sessionID)
+        let identifiers = ["longshot.saved.\(sessionID)"]
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+    }
+
     private func record(_ diagnostic: ResultNotificationDiagnostic) {
         do {
             let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -317,6 +324,12 @@ struct SavedResultPresentationStore {
         update { $0.considerExistingResult(sessionID: sessionID) }
     }
     func acknowledge(sessionID: String) { update { $0.acknowledge(sessionID: sessionID) } }
+    func forget(sessionID: String) {
+        update {
+            if $0.pendingSessionID == sessionID { $0.pendingSessionID = nil }
+            if $0.acknowledgedSessionID == sessionID { $0.acknowledgedSessionID = nil }
+        }
+    }
 
     private func update(_ mutation: (inout SavedResultPresentationState) -> Void) {
         var value = state

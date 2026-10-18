@@ -22,4 +22,4 @@ const permissionZh = readStrings(join(app, 'zh-Hans.lproj/InfoPlist.strings'));
 assert.deepEqual(Object.keys(permissionEn).sort(), Object.keys(permissionZh).sort());
 assert.ok(permissionEn.NSScreenCaptureUsageDescription.includes('explicitly share'));
 assert.ok(permissionEn.NSPhotoLibraryAddUsageDescription.includes('photo library'));
-console.log('Both signed targets contain Chinese/English control metadata; permission usage strings are bilingual');
+console.log('Both built targets contain Chinese/English control metadata; permission usage strings are bilingual (signature not tested)');

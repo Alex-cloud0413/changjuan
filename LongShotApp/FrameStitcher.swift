@@ -18,9 +18,9 @@ enum StitchError: LocalizedError {
         case .unreadableFrame(let url):
             return "无法读取画面：\(url.lastPathComponent)"
         case .inconsistentFrameSize:
-            return "录制过程中屏幕方向或尺寸发生了变化，请保持竖屏后重试。"
+            return "录制过程中屏幕方向或尺寸发生了变化，请保持同一屏幕方向后重试。"
         case .noUsableMovement:
-            return "没有识别到连续滚动内容。请缓慢向上或向下滚动，保持相邻画面有重叠。"
+            return "没有识别到连续滚动内容。请沿设置中的拼接方向缓慢滚动，保持相邻画面有重叠。"
         case .couldNotEncode:
             return "长图生成失败，请重试。"
         case .unusablePage(let number):
@@ -76,15 +76,17 @@ final class FrameStitcher {
         let end: Int
     }
 
-    private let topInsetRatio: CGFloat = 0.075
+    private var topInsetRatio: CGFloat { options.axis == .horizontal ? 0.20 : 0.075 }
     // Keep common tab bars, coupon strips, and floating purchase rails out of
     // every appended slice. The final frame adds this viewport-fixed area once.
-    private let bottomInsetRatio: CGFloat = 0.19
+    private var bottomInsetRatio: CGFloat { options.axis == .horizontal ? 0.08 : 0.19 }
     private let maximumOutputHeight: CGFloat = 16_000
     private let usePreparedFrames: Bool
+    private let options: CaptureOptions
 
-    init(usePreparedFrames: Bool = true) {
+    init(usePreparedFrames: Bool = true, options: CaptureOptions = CaptureOptions()) {
         self.usePreparedFrames = usePreparedFrames
+        self.options = options
     }
 
     func stitch(
@@ -102,7 +104,7 @@ final class FrameStitcher {
         samples.reserveCapacity(frameURLs.count)
         for url in frameURLs {
             samples.append(try autoreleasepool {
-                if usePreparedFrames, let prepared = FramePreparationCache.load(for: url) {
+                if usePreparedFrames, let prepared = FramePreparationCache.load(for: url, axis: options.axis) {
                     preparedFrameCount += 1
                     return FrameSample(
                         url: url, imageSize: CGSize(width: prepared.imageWidth, height: prepared.imageHeight),
@@ -130,7 +132,8 @@ final class FrameStitcher {
         let contentBottom = height - ceil(height * bottomInsetRatio)
         let contentHeight = contentBottom - contentTop
         guard contentHeight > 0 else { throw StitchError.inconsistentFrameSize }
-        let outputTop = min(contentTop, ceil(height * max(0, topCropRatio)))
+        let outputTop = options.axis == .horizontal || options.keepsStatusBar
+            ? 0 : min(contentTop, ceil(height * max(0, topCropRatio)))
 
         var pieces: [Piece] = []
         var usedFrames = Set<Int>()
@@ -146,7 +149,7 @@ final class FrameStitcher {
         func alignmentFrame(at index: Int) throws -> GrayFrame {
             if let cached = alignmentFrames[index] { return cached }
             let frame: GrayFrame
-            if usePreparedFrames, let prepared = FramePreparationCache.load(for: samples[index].url) {
+            if usePreparedFrames, let prepared = FramePreparationCache.load(for: samples[index].url, axis: options.axis) {
                 preparedAlignmentCount += 1
                 frame = prepared.alignment
             } else {
@@ -293,7 +296,11 @@ final class FrameStitcher {
             let outputURL = outputDirectory.appendingPathComponent(
                 String(format: "longshot-%02d.jpg", index + 1)
             )
-            try render(page: page, width: width, to: outputURL)
+            if options.axis == .horizontal {
+                try renderHorizontal(page: page, originalHeight: width, topCropRatio: topCropRatio, to: outputURL)
+            } else {
+                try render(page: page, width: width, to: outputURL)
+            }
             outputURLs.append(outputURL)
         }
 
@@ -321,16 +328,18 @@ final class FrameStitcher {
               let image = UIImage(data: encodedData), let cgImage = image.cgImage else {
             throw StitchError.unreadableFrame(url)
         }
-        let gray = try makeGrayFrame(from: cgImage)
-        let alignment = try makeAlignmentGrayFrame(from: cgImage)
+        let working = try workingImage(cgImage)
+        let gray = try makeGrayFrame(from: working)
+        let alignment = try makeAlignmentGrayFrame(from: working)
         let overlay = CaptureOverlayDetector.inspect(cgImage)
         return PreparedFrame(
             version: FramePreparationCache.version, sourceByteCount: identity.bytes,
-            sourceModifiedAt: identity.modifiedAt, imageWidth: cgImage.width, imageHeight: cgImage.height,
+            sourceModifiedAt: identity.modifiedAt, imageWidth: working.width, imageHeight: working.height,
             coarseHeight: gray.height, coarsePixels: Data(gray.pixels),
             alignmentHeight: alignment.height, alignmentPixels: Data(alignment.pixels),
-            coveredTop: Double(ceil(CGFloat(cgImage.height) * overlay.coveredTopRatio)),
-            isSystemPanel: overlay.isSystemPanel
+            coveredTop: options.axis == .horizontal ? 0 : Double(ceil(CGFloat(cgImage.height) * overlay.coveredTopRatio)),
+            isSystemPanel: overlay.isSystemPanel || (options.axis == .horizontal && overlay.coveredTopRatio > 0),
+            axis: options.axis, sampleWidth: gray.width
         )
     }
 
@@ -339,13 +348,31 @@ final class FrameStitcher {
               let cgImage = image.cgImage else {
             throw StitchError.unreadableFrame(url)
         }
-        let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
-        let gray = try makeGrayFrame(from: cgImage)
+        let working = try workingImage(cgImage)
+        let imageSize = CGSize(width: working.width, height: working.height)
+        let gray = try makeGrayFrame(from: working)
         let overlay = CaptureOverlayDetector.inspect(cgImage)
         return FrameSample(
             url: url, imageSize: imageSize, gray: gray,
-            coveredTop: ceil(imageSize.height * overlay.coveredTopRatio), isSystemPanel: overlay.isSystemPanel
+            coveredTop: options.axis == .horizontal ? 0 : ceil(imageSize.height * overlay.coveredTopRatio),
+            isSystemPanel: overlay.isSystemPanel || (options.axis == .horizontal && overlay.coveredTopRatio > 0)
         )
+    }
+
+    /// Transpose only the matching view. Final rendering uses original JPEGs
+    /// directly, at 1:1 scale, without rotated intermediate JPEGs or re-encoding.
+    private func workingImage(_ original: CGImage) throws -> CGImage {
+        guard options.axis == .horizontal else { return original }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        format.preferredRange = .standard
+        let size = CGSize(width: original.height, height: original.width)
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            UIImage(cgImage: original, scale: 1, orientation: .leftMirrored).draw(in: CGRect(origin: .zero, size: size))
+        }
+        guard let result = image.cgImage else { throw StitchError.couldNotEncode }
+        return result
     }
 
     private func makeSegmentPieces(
@@ -398,9 +425,13 @@ final class FrameStitcher {
         let contentHeight = sourceHeight - top - bottom
         guard contentHeight > 0 else { throw StitchError.inconsistentFrameSize }
 
-        let targetWidth = 72
-        let targetHeight = max(96, Int(round((contentHeight / sourceWidth) * CGFloat(targetWidth))))
-        let cropRect = CGRect(x: 0, y: top, width: sourceWidth, height: contentHeight)
+        let targetWidth = options.axis == .horizontal ? 192 : 72
+        // In horizontal mode, exclude fixed top/bottom chrome from matching,
+        // not from the rendered table. Rows/columns remain in their real order.
+        let crossInset = options.axis == .horizontal ? floor(sourceWidth * 0.20) : 0
+        let crossWidth = options.axis == .horizontal ? floor(sourceWidth * 0.60) : sourceWidth
+        let targetHeight = max(96, Int(round((contentHeight / crossWidth) * CGFloat(targetWidth))))
+        let cropRect = CGRect(x: crossInset, y: top, width: crossWidth, height: contentHeight)
         guard let cropped = cgImage.cropping(to: cropRect) else {
             throw StitchError.inconsistentFrameSize
         }
@@ -429,7 +460,7 @@ final class FrameStitcher {
               let cgImage = image.cgImage else {
             throw StitchError.unreadableFrame(url)
         }
-        return try makeAlignmentGrayFrame(from: cgImage)
+        return try makeAlignmentGrayFrame(from: workingImage(cgImage))
     }
 
     private func makeAlignmentGrayFrame(from cgImage: CGImage) throws -> GrayFrame {
@@ -440,9 +471,11 @@ final class FrameStitcher {
         let contentHeight = sourceHeight - top - bottom
         guard contentHeight > 0 else { throw StitchError.inconsistentFrameSize }
 
-        let targetWidth = 72
+        let targetWidth = options.axis == .horizontal ? 192 : 72
         let targetHeight = Int(contentHeight)
-        let cropRect = CGRect(x: 0, y: top, width: sourceWidth, height: contentHeight)
+        let crossInset = options.axis == .horizontal ? floor(sourceWidth * 0.20) : 0
+        let crossWidth = options.axis == .horizontal ? floor(sourceWidth * 0.60) : sourceWidth
+        let cropRect = CGRect(x: crossInset, y: top, width: crossWidth, height: contentHeight)
         guard let cropped = cgImage.cropping(to: cropRect) else {
             throw StitchError.inconsistentFrameSize
         }
@@ -550,6 +583,117 @@ final class FrameStitcher {
             throw StitchError.couldNotEncode
         }
         try data.write(to: outputURL, options: .atomic)
+    }
+
+    private func renderHorizontal(page: [Piece], originalHeight: CGFloat, topCropRatio: Double, to outputURL: URL) throws {
+        let width = page.reduce(CGFloat(0)) { $0 + $1.sourceRect.height }
+        let statusHeight = min(floor(originalHeight * 0.075), ceil(originalHeight * max(0, topCropRatio)))
+        let headerHeight = options.keepsStatusBar ? statusHeight : 0
+        let height = originalHeight - statusHeight + headerHeight
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        format.preferredRange = .standard
+        // Each explicit page keeps its fixed top/bottom chrome once. Moving
+        // column headings remain in the table because they differ across frames.
+        var groups: [[Piece]] = []
+        for piece in page {
+            if piece.frameURL == nil { groups.append([piece]); continue }
+            if groups.last?.last?.frameURL == nil { groups.append([]) }
+            groups[groups.count - 1].append(piece)
+        }
+        let insets = groups.map { fixedHorizontalInsets($0, height: Int(originalHeight), statusHeight: Int(statusHeight)) }
+        var unreadable: URL?
+        let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            var destinationX: CGFloat = 0
+            for (groupIndex, group) in groups.enumerated() {
+                let startX = destinationX
+                let top = CGFloat(insets[groupIndex].top), bottom = CGFloat(insets[groupIndex].bottom)
+                for piece in group {
+                    autoreleasepool {
+                        guard let frameURL = piece.frameURL else {
+                            UIColor(white: 0.93, alpha: 1).setFill()
+                            context.fill(CGRect(x: destinationX, y: headerHeight, width: piece.sourceRect.height,
+                                                height: originalHeight - statusHeight))
+                            return
+                        }
+                        guard let source = UIImage(contentsOfFile: frameURL.path) else { unreadable = frameURL; return }
+                        let destination = CGRect(x: destinationX, y: headerHeight + top - statusHeight,
+                                                 width: piece.sourceRect.height, height: originalHeight - top - bottom)
+                        context.cgContext.saveGState()
+                        context.cgContext.clip(to: destination)
+                        source.draw(at: CGPoint(x: destinationX - piece.sourceRect.minY, y: headerHeight - statusHeight))
+                        context.cgContext.restoreGState()
+                    }
+                    destinationX += piece.sourceRect.height
+                }
+                if let url = group.first?.frameURL, let source = UIImage(contentsOfFile: url.path) {
+                    context.cgContext.saveGState()
+                    let chromeWidth = min(destinationX - startX, source.size.width)
+                    let bands = [CGRect(x: startX, y: headerHeight, width: chromeWidth, height: top - statusHeight),
+                                 CGRect(x: startX, y: height - bottom, width: chromeWidth, height: bottom)]
+                    context.cgContext.clip(to: bands)
+                    source.draw(at: CGPoint(x: startX, y: headerHeight - statusHeight))
+                    context.cgContext.restoreGState()
+                }
+            }
+            // Preserve one authentic status bar, not a stretched/repeated row
+            // of time, battery and recording indicators across a wide image.
+            if headerHeight > 0, let url = page.compactMap(\.frameURL).first,
+               let source = UIImage(contentsOfFile: url.path) {
+                context.cgContext.saveGState()
+                context.cgContext.clip(to: CGRect(x: 0, y: 0, width: min(width, source.size.width), height: headerHeight))
+                source.draw(at: .zero)
+                context.cgContext.restoreGState()
+            }
+        }
+        if let unreadable { throw StitchError.unreadableFrame(unreadable) }
+        guard let data = image.jpegData(compressionQuality: 0.94) else { throw StitchError.couldNotEncode }
+        try data.write(to: outputURL, options: .atomic)
+    }
+
+    /// Only remove the repetition of rows that are unchanged at the same
+    /// viewport coordinates across distant accepted frames. Keep the original
+    /// row once; never guess or crop a fixed percentage of the actual table.
+    private func fixedHorizontalInsets(_ pieces: [Piece], height: Int, statusHeight: Int) -> (top: Int, bottom: Int) {
+        var urls: [URL] = []
+        for url in pieces.compactMap(\.frameURL) where !urls.contains(url) { urls.append(url) }
+        guard urls.count > 1 else { return (statusHeight, 0) }
+        var selected: [URL] = []
+        for url in [urls[0], urls[urls.count / 2], urls[urls.count - 1]] where !selected.contains(url) { selected.append(url) }
+        let width = 96
+        let rows: [[UInt8]] = selected.compactMap { url in
+            guard let image = UIImage(contentsOfFile: url.path)?.cgImage else { return nil }
+            var pixels = [UInt8](repeating: 0, count: width * height)
+            let valid = pixels.withUnsafeMutableBytes { memory -> Bool in
+                guard let ctx = CGContext(data: memory.baseAddress, width: width, height: height,
+                    bitsPerComponent: 8, bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return false }
+                ctx.interpolationQuality = .medium
+                ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+                return true
+            }
+            return valid ? pixels : nil
+        }
+        guard rows.count == selected.count, let first = rows.first else { return (statusHeight, 0) }
+        func unchanged(_ y: Int) -> Bool {
+            rows.dropFirst().allSatisfy { other in
+                var difference = 0, changed = 0
+                for x in 0..<width {
+                    let d = abs(Int(first[y * width + x]) - Int(other[y * width + x]))
+                    difference += d
+                    if d > 10 { changed += 1 }
+                }
+                return difference <= width && changed <= 1
+            }
+        }
+        var top = statusHeight
+        while top < Int(Double(height) * 0.25), unchanged(top) { top += 1 }
+        var bottom = 0
+        while bottom < Int(Double(height) * 0.20), unchanged(height - bottom - 1) { bottom += 1 }
+        // A two-pixel guard leaves antialiased borders with the moving content.
+        return (max(statusHeight, top - 2), max(0, bottom - 2))
     }
 
     private func removeOldOutputs(from directory: URL) throws {

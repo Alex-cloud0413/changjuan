@@ -35,6 +35,22 @@ enum CaptureSessionState: String, Codable {
     case failed
 }
 
+enum CaptureAxis: String, Codable, CaseIterable, Sendable {
+    case vertical, horizontal
+}
+
+struct CaptureOptions: Codable, Equatable, Sendable {
+    var axis: CaptureAxis = .vertical
+    var keepsStatusBar = false
+    static let axisKey = "longshot.captureAxis.v1"
+    static let statusBarKey = "longshot.keepsStatusBar.v1"
+
+    static func load(from defaults: UserDefaults = .standard) -> CaptureOptions {
+        CaptureOptions(axis: CaptureAxis(rawValue: defaults.string(forKey: axisKey) ?? "") ?? .vertical,
+                       keepsStatusBar: defaults.bool(forKey: statusBarKey))
+    }
+}
+
 struct CaptureManifest: Codable, Equatable {
     let id: String
     let startedAt: Date
@@ -56,4 +72,6 @@ struct CaptureManifest: Codable, Equatable {
     // Raw-frame indices at which an explicitly resumed page begins. Optional
     // keeps every previously recorded manifest readable.
     var segmentStarts: [Int]? = nil
+    // Snapshot at capture start: changing settings cannot reinterpret old frames.
+    var captureOptions: CaptureOptions? = nil
 }

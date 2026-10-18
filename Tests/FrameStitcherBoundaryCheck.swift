@@ -46,6 +46,7 @@ struct FrameStitcherBoundaryCheck {
         try verifyPixelAccurateAlignment(in: directory)
         try verifyBidirectionalAndPageSegments(targetFrames, in: directory)
         try verifyOverlayDetection(in: directory)
+        try verifyInvalidInputs(targetFrames, in: directory)
         try verifyPreparedFrameEquivalence(targetFrames, in: directory)
         try verifyFullSizePreparation(in: directory)
         print("FrameStitcher boundary checks passed; reverse/revisit, segmented pages and overlay recovery included. Fixtures: \(directory.path)")
@@ -93,6 +94,11 @@ struct FrameStitcherBoundaryCheck {
             return try FrameStitcher().stitch(frameURLs: sources, sessionURL: session, segmentStarts: boundaries)
         }
         let baseline = try stitch(frames, name: "forward")
+        let kept = try FrameStitcher(options: CaptureOptions(keepsStatusBar: true)).stitch(
+            frameURLs: frames, sessionURL: directory.appendingPathComponent("vertical-with-status")
+        )
+        require(try imageSize(at: kept.outputURLs[0]).height == imageSize(at: baseline.outputURLs[0]).height + 60)
+        require(kept.acceptedFrameCount == baseline.acceptedFrameCount)
         let reverse = try stitch(Array(frames.reversed()), name: "reverse")
         let revisit = try stitch(frames + Array(frames.reversed()) + frames, name: "revisit")
         require(try Data(contentsOf: baseline.outputURLs[0]) == Data(contentsOf: reverse.outputURLs[0]))
@@ -185,7 +191,11 @@ struct FrameStitcherBoundaryCheck {
         let all = frames + extra + precision
         let originals = try all.map { try Data(contentsOf: $0) }
         for (url, data) in zip(all, originals) {
-            try FramePreparationCache.store(FrameStitcher().prepareFrame(at: url, encodedData: data), for: url)
+            let prepared = try FrameStitcher().prepareFrame(at: url, encodedData: data)
+#if LONGSHOT_BASELINE_CHECKS
+            try requireLegacyPreparationMatches(prepared, at: url, data: data)
+#endif
+            try FramePreparationCache.store(prepared, for: url)
             require(FramePreparationCache.load(for: url) != nil)
         }
 
@@ -205,6 +215,19 @@ struct FrameStitcherBoundaryCheck {
             for (left, right) in zip(baseline.outputURLs, prepared.outputURLs) {
                 require(try Data(contentsOf: left) == Data(contentsOf: right))
             }
+#if LONGSHOT_BASELINE_CHECKS
+            let legacy = try LegacyFrameStitcher().stitch(
+                frameURLs: sources, sessionURL: directory.appendingPathComponent("release-baseline-\(name)"),
+                segmentStarts: boundaries
+            )
+            require(legacy.acceptedFrameCount == prepared.acceptedFrameCount)
+            require(legacy.skippedFrameCount == prepared.skippedFrameCount)
+            require(legacy.outputURLs.count == prepared.outputURLs.count)
+            for (left, right) in zip(legacy.outputURLs, prepared.outputURLs) {
+                require(try Data(contentsOf: left) == Data(contentsOf: right))
+            }
+            print("release baseline \(name): output byte-identical")
+#endif
             print(String(format: "prepared %@: %d/%d hits, output byte-identical; uncached %.4fs cached %.4fs",
                          name, prepared.preparedFrameCount, sources.count, baseline.timings.total, prepared.timings.total))
         }
@@ -225,6 +248,44 @@ struct FrameStitcherBoundaryCheck {
         try compare(frames, "missing-corrupt-stale", expectedHits: frames.count - 3)
         for (url, original) in zip(all, originals) { require(try Data(contentsOf: url) == original) }
     }
+
+    private static func verifyInvalidInputs(_ frames: [URL], in directory: URL) throws {
+        let originals = try frames.map { try Data(contentsOf: $0) }
+        let corrupt = directory.appendingPathComponent("broken-original.jpg")
+        let absent = directory.appendingPathComponent("missing-original.jpg")
+        let resized = directory.appendingPathComponent("changed-orientation.jpg")
+        try Data([0, 1, 2, 3]).write(to: corrupt)
+        try makeUnrelatedFrame(size: CGSize(width: 280, height: 640)).write(to: resized)
+        let cases: [([URL], String)] = [([], "empty"), ([frames[0], corrupt, frames[1]], "corrupt"),
+            ([frames[0], absent, frames[1]], "missing"), ([frames[0], resized, frames[1]], "size")]
+        for (sources, name) in cases {
+            do {
+                _ = try FrameStitcher().stitch(frameURLs: sources,
+                    sessionURL: directory.appendingPathComponent("invalid-\(name)"))
+                fatalError("Invalid original input must not report success: \(name)")
+            } catch let error as StitchError {
+                switch (name, error) {
+                case ("empty", .notEnoughFrames), ("corrupt", .unreadableFrame),
+                     ("missing", .unreadableFrame), ("size", .inconsistentFrameSize): break
+                default: fatalError("Unexpected error for \(name): \(error)")
+                }
+            }
+        }
+        for (url, bytes) in zip(frames, originals) { require(try Data(contentsOf: url) == bytes) }
+        print("Invalid original inputs passed (4): empty/corrupt/missing/size-change; original frames preserved")
+    }
+
+#if LONGSHOT_BASELINE_CHECKS
+    private static func requireLegacyPreparationMatches(_ current: PreparedFrame, at url: URL, data: Data) throws {
+        // Both implementations reading a new-format cache alone would not
+        // catch a producer regression. Independently prepare from the JPEG.
+        let previous = try LegacyFrameStitcher().prepareFrame(at: url, encodedData: data)
+        require(previous.imageWidth == current.imageWidth && previous.imageHeight == current.imageHeight)
+        require(previous.coarseHeight == current.coarseHeight && previous.coarsePixels == current.coarsePixels)
+        require(previous.alignmentHeight == current.alignmentHeight && previous.alignmentPixels == current.alignmentPixels)
+        require(previous.coveredTop == current.coveredTop && previous.isSystemPanel == current.isSystemPanel)
+    }
+#endif
 
     private static func dumpSelection(_ urls: [URL]) throws {
         let frames = try urls.map { url -> GrayFrame in
@@ -295,8 +356,12 @@ struct FrameStitcherBoundaryCheck {
                 try data.write(to: url)
                 frames.append(url)
                 let started = ProcessInfo.processInfo.systemUptime
-                try FramePreparationCache.store(FrameStitcher().prepareFrame(at: url, encodedData: data), for: url)
+                let prepared = try FrameStitcher().prepareFrame(at: url, encodedData: data)
+                try FramePreparationCache.store(prepared, for: url)
                 preparationSeconds.append(ProcessInfo.processInfo.systemUptime - started)
+#if LONGSHOT_BASELINE_CHECKS
+                try requireLegacyPreparationMatches(prepared, at: url, data: data)
+#endif
             }
         }
         let pages = frames + Array(frames.reversed()) + frames
@@ -326,6 +391,48 @@ struct FrameStitcherBoundaryCheck {
                      baseline.timings.sampling, prepared.timings.sampling,
                      baseline.timings.assembly, prepared.timings.assembly,
                      sorted[sorted.count / 2], sorted[Int(Double(sorted.count) * 0.95)], prepared.outputURLs.count))
+#if LONGSHOT_BASELINE_CHECKS
+        // Above is the warm-up pair. Alternate order over five measured pairs
+        // to reduce OS/disk-cache order bias. Never time compilation/fixtures.
+        var previousSamples: [[String: Double]] = []
+        var currentSamples: [[String: Double]] = []
+        func metrics(_ t: StitchTimings) -> [String: Double] {
+            ["sampling": t.sampling, "selection": t.selection, "assembly": t.assembly,
+             "rendering": t.rendering, "total": t.total]
+        }
+        for index in 0..<5 {
+            try autoreleasepool {
+                var old: LegacyStitchResult!
+                var new: StitchResult!
+                func previous() throws {
+                    old = try LegacyFrameStitcher().stitch(frameURLs: pages,
+                        sessionURL: directory.appendingPathComponent("perf-old-\(index)"), segmentStarts: boundaries)
+                }
+                func current() throws {
+                    new = try FrameStitcher().stitch(frameURLs: pages,
+                        sessionURL: directory.appendingPathComponent("perf-new-\(index)"), segmentStarts: boundaries)
+                }
+                if index % 2 == 0 { try previous(); try current() }
+                else { try current(); try previous() }
+                require(old.preparedFrameCount == pages.count && new.preparedFrameCount == pages.count)
+                require(old.acceptedFrameCount == new.acceptedFrameCount)
+                require(old.skippedFrameCount == new.skippedFrameCount)
+                require(old.outputURLs.count == new.outputURLs.count)
+                for (left, right) in zip(old.outputURLs, new.outputURLs) {
+                    require(try Data(contentsOf: left) == Data(contentsOf: right))
+                }
+                previousSamples.append(["sampling": old.timings.sampling, "selection": old.timings.selection,
+                    "assembly": old.timings.assembly, "rendering": old.timings.rendering, "total": old.timings.total])
+                currentSamples.append(metrics(new.timings))
+            }
+        }
+        let report: [String: Any] = ["fixture": "vertical-1206x2622-90-frames-3-pages",
+            "frameCount": pages.count, "pageCount": boundaries.count, "outputCount": prepared.outputURLs.count,
+            "warmupPairs": 1, "measuredPairs": 5, "preparedFrameCount": prepared.preparedFrameCount,
+            "outputsByteIdentical": true, "baseline": previousSamples, "current": currentSamples]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+        print("LONGSHOT_PERF " + String(decoding: data, as: UTF8.self))
+#endif
     }
 
     private static func emit(_ message: String) {

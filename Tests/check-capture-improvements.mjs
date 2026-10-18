@@ -43,12 +43,20 @@ run("xcrun", ["simctl", "spawn", simulator, pipeline]);
 const baselineSources = [];
 const baselineFlags = [];
 if (process.env.LONGSHOT_STITCH_BASELINE) {
-  const legacy = readFileSync(process.env.LONGSHOT_STITCH_BASELINE, "utf8").replace(
-    /\b(FrameStitcher|StitchError|StitchResult|StitchTimings|CaptureOverlayDetector)\b/g, name => `Legacy${name}`
+  const rename = source => source.replace(
+    /\b(FrameStitcher|StitchError|StitchResult|StitchTimings|CaptureOverlayDetector|FramePreparationCache|PreparedFrame|FramePreprocessor)\b/g,
+    name => `Legacy${name}`
   );
+  // A pinned pair prevents a new cache reader from masking regressions in the
+  // previous release. Legacy and current receive exactly the same JPEGs.
+  if (!process.env.LONGSHOT_CACHE_BASELINE) throw new Error("Pass the baseline cache source with the stitcher");
+  const legacy = rename(readFileSync(process.env.LONGSHOT_STITCH_BASELINE, "utf8"));
   const legacyFile = join(work, "LegacyFrameStitcher.swift");
   writeFileSync(legacyFile, legacy);
   baselineSources.push(legacyFile);
+  const legacyCache = join(work, "LegacyFramePreparationCache.swift");
+  writeFileSync(legacyCache, rename(readFileSync(process.env.LONGSHOT_CACHE_BASELINE, "utf8")));
+  baselineSources.push(legacyCache);
   baselineFlags.push("-D", "LONGSHOT_BASELINE_CHECKS");
 }
 const stitcher = compile("stitcher", [shared("CaptureConstants.swift"), shared("CaptureStorage.swift"),
@@ -56,6 +64,17 @@ const stitcher = compile("stitcher", [shared("CaptureConstants.swift"), shared("
   ...baselineSources, join(testDirectory, "FrameStitcherBoundaryCheck.swift")],
   ["-D", "LONGSHOT_CAPTURE_CHECKS", ...baselineFlags]);
 run("xcrun", ["simctl", "spawn", simulator, stitcher, "--nonperiodic", ...(process.argv[3] ? [process.argv[3]] : [])]);
+const viewSource = readFileSync(app("ContentView.swift"), "utf8");
+const previewStart = viewSource.indexOf("private struct ZoomableLongImage:");
+const previewEnd = viewSource.indexOf("\nstruct CaptureSettingsView:", previewStart);
+if (previewStart < 0 || previewEnd < 0) throw new Error("Cannot extract actual preview layout");
+const preview = join(work, "ProductionPreview.swift");
+writeFileSync(preview, "import SwiftUI\nimport UIKit\n" + viewSource.slice(previewStart, previewEnd)
+  .replace("private struct ZoomableLongImage:", "struct ZoomableLongImage:"));
+const options = compile("options", [shared("CaptureConstants.swift"), shared("CaptureStorage.swift"),
+  shared("OverlapEstimator.swift"), app("FrameStitcher.swift"), app("FramePreparationCache.swift"),
+  preview, join(testDirectory, "CaptureOptionsCheck.swift")], ["-D", "LONGSHOT_CAPTURE_CHECKS"]);
+run("xcrun", ["simctl", "spawn", simulator, options]);
 const visual = compile("visual", [shared("AppLanguage.swift"), shared("CaptureSystemIntegration.swift"),
   join(project, "LongScrollWidgets", "LongScrollLiveActivity.swift"), join(testDirectory, "CaptureActivityVisualCheck.swift")],
   ["-D", "LONGSHOT_SCREEN_CAPTURE_KIT"]);

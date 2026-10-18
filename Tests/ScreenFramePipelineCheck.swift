@@ -25,11 +25,13 @@ struct ScreenFramePipelineCheck {
         try testExplicitPageTransitions()
         try testPreparationBackpressurePreservesAllFrames()
         try testPreparationFailurePreservesAllFrames()
+        try testLatePreparationCannotRecreateCleanedFiles()
+        try testOptionsSnapshotAndManualCleanup()
         try benchmarkFullSizeFrames()
 #if LONGSHOT_SCK_METADATA_STUB
-        print("ScreenFramePipeline JPEG/queue checks passed (8); SCK metadata/stream unavailable and excluded on this runtime.")
+        print("ScreenFramePipeline JPEG/queue checks passed (10); SCK metadata/stream unavailable and excluded on this runtime.")
 #else
-        print("ScreenFramePipeline checks passed (8)")
+        print("ScreenFramePipeline checks passed (10)")
 #endif
         print("Fixtures: \(directory.path)")
     }
@@ -180,6 +182,61 @@ struct ScreenFramePipelineCheck {
         require(completion?.manifest.state == .complete)
         require(completion?.manifest.frameCount == 6)
         require(try CaptureStorage.frameURLs(in: session).count == 6)
+    }
+
+    private static func testLatePreparationCannotRecreateCleanedFiles() throws {
+        let prepared = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+        let preprocessor = FramePreprocessor { data, url in
+            let cached = try FrameStitcher().prepareFrame(at: url, encodedData: data)
+            prepared.signal()
+            _ = resume.wait(timeout: .now() + 5)
+            try FramePreparationCache.store(cached, for: url)
+        }
+        let pipeline = ScreenFramePipeline(preprocessor: preprocessor, hostIsForeground: { false })
+        let session = try pipeline.beginSession(topCropRatio: 0.075)
+        _ = pipeline.consume(try makeSample(index: 0))
+        require(prepared.wait(timeout: .now() + 5) == .success)
+        _ = pipeline.finishSession(autoStopped: false, trimTrailingFrames: false)
+        try CaptureStorage.markOutputsSavedToPhotos(in: session)
+        let report = SavedCaptureCleanup.run(protectedSessionIDs: [session.lastPathComponent])
+        require(report.failures == 0)
+        require(try CaptureStorage.frameURLs(in: session).isEmpty)
+        resume.signal()
+        preprocessor.waitForTesting()
+        require(!FileManager.default.fileExists(atPath: session.appendingPathComponent("Analysis-v1").path))
+        require(try CaptureStorage.frameURLs(in: session).isEmpty)
+    }
+
+    private static func testOptionsSnapshotAndManualCleanup() throws {
+        let prepared = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+        let options = CaptureOptions(axis: .horizontal, keepsStatusBar: true)
+        let preprocessor = FramePreprocessor { data, url in
+            let cache = try FrameStitcher(options: options).prepareFrame(at: url, encodedData: data)
+            prepared.signal()
+            _ = resume.wait(timeout: .now() + 5)
+            try FramePreparationCache.store(cache, for: url)
+        }
+        let pipeline = ScreenFramePipeline(preprocessor: preprocessor, hostIsForeground: { false })
+        let session = try pipeline.beginSession(topCropRatio: 0.075, options: options)
+        require(try CaptureStorage.readManifest(at: session).captureOptions == options)
+        _ = pipeline.consume(try makeSample(index: 0))
+        require(prepared.wait(timeout: .now() + 5) == .success)
+        let completion = pipeline.finishSession(autoStopped: false, trimTrailingFrames: false)
+        require(completion?.manifest.captureOptions == options)
+        let report = SavedCaptureCleanup.clearAllRawCaches()
+        require(report.failures == 0 && report.clearedRawSessionIDs.contains(session.lastPathComponent))
+        resume.signal()
+        preprocessor.waitForTesting()
+        require(CaptureStorage.hasDiscardedRawFrames(in: session))
+        require(!FileManager.default.fileExists(atPath: session.appendingPathComponent("Analysis-v1").path))
+        // Old manifest files are decoded without invented preferences.
+        var json = try JSONSerialization.jsonObject(with: Data(contentsOf: session.appendingPathComponent("manifest.json"))) as! [String: Any]
+        json.removeValue(forKey: "captureOptions")
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let legacy = try decoder.decode(CaptureManifest.self, from: JSONSerialization.data(withJSONObject: json))
+        require(legacy.captureOptions == nil)
     }
 
     private static func makeSample(index: Int, width: Int = 120, height: Int = 260) throws -> CMSampleBuffer {

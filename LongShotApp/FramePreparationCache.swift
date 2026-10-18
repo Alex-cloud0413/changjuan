@@ -15,13 +15,15 @@ struct PreparedFrame: Codable {
     let alignmentPixels: Data
     let coveredTop: Double
     let isSystemPanel: Bool
+    var axis: CaptureAxis? = nil
+    var sampleWidth: Int? = nil
 
     var gray: GrayFrame {
-        GrayFrame(width: 72, height: coarseHeight, pixels: Array(coarsePixels))
+        GrayFrame(width: sampleWidth ?? 72, height: coarseHeight, pixels: Array(coarsePixels))
     }
 
     var alignment: GrayFrame {
-        GrayFrame(width: 72, height: alignmentHeight, pixels: Array(alignmentPixels))
+        GrayFrame(width: sampleWidth ?? 72, height: alignmentHeight, pixels: Array(alignmentPixels))
     }
 }
 
@@ -44,13 +46,14 @@ enum FramePreparationCache {
         return (bytes, modifiedAt)
     }
 
-    static func load(for frame: URL) -> PreparedFrame? {
+    static func load(for frame: URL, axis: CaptureAxis = .vertical) -> PreparedFrame? {
         let url = cacheURL(for: frame)
         guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
               size > 0, size <= 2_000_000,
               let data = try? Data(contentsOf: url),
               let prepared = try? PropertyListDecoder().decode(PreparedFrame.self, from: data),
               prepared.version == version,
+              (prepared.axis ?? .vertical) == axis,
               let identity = try? sourceIdentity(for: frame),
               prepared.sourceByteCount == identity.bytes,
               prepared.sourceModifiedAt == identity.modifiedAt,
@@ -58,14 +61,24 @@ enum FramePreparationCache {
               prepared.imageHeight > 0, prepared.imageHeight <= 16_384,
               prepared.coarseHeight >= 96, prepared.coarseHeight <= 16_384,
               prepared.alignmentHeight > 0, prepared.alignmentHeight <= 16_384,
-              prepared.coarsePixels.count == 72 * prepared.coarseHeight,
-              prepared.alignmentPixels.count == 72 * prepared.alignmentHeight,
+              (prepared.sampleWidth ?? 72) == (axis == .horizontal ? 192 : 72),
+              prepared.coarsePixels.count == (prepared.sampleWidth ?? 72) * prepared.coarseHeight,
+              prepared.alignmentPixels.count == (prepared.sampleWidth ?? 72) * prepared.alignmentHeight,
               prepared.coveredTop.isFinite, prepared.coveredTop >= 0,
               prepared.coveredTop <= Double(prepared.imageHeight) else { return nil }
         return prepared
     }
 
     static func store(_ prepared: PreparedFrame, for frame: URL) throws {
+        try CaptureStorage.withFrameCacheMutation {
+            let session = frame.deletingLastPathComponent()
+            guard !CaptureStorage.hasSavedOutputsToPhotos(in: session),
+                  !CaptureStorage.hasDiscardedRawFrames(in: session) else { return }
+            try storeBeforeSave(prepared, for: frame)
+        }
+    }
+
+    private static func storeBeforeSave(_ prepared: PreparedFrame, for frame: URL) throws {
         let identity = try sourceIdentity(for: frame)
         guard prepared.sourceByteCount == identity.bytes,
               prepared.sourceModifiedAt == identity.modifiedAt else { return }
@@ -87,23 +100,28 @@ final class FramePreprocessor: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.gaoyiming.longshot.frame-preparation", qos: .utility)
     private let lock = NSLock()
     private var pendingCount = 0
-    private let prepare: @Sendable (Data, URL) throws -> Void
+    private let prepare: (@Sendable (Data, URL) throws -> Void)?
 
-    init(prepare: @escaping @Sendable (Data, URL) throws -> Void = { data, url in
-        let prepared = try FrameStitcher().prepareFrame(at: url, encodedData: data)
-        try FramePreparationCache.store(prepared, for: url)
-    }) {
+    init(prepare: (@Sendable (Data, URL) throws -> Void)? = nil) {
         self.prepare = prepare
     }
 
     @discardableResult
-    func enqueue(_ data: Data, for frame: URL) -> Bool {
+    func enqueue(_ data: Data, for frame: URL, options: CaptureOptions = CaptureOptions()) -> Bool {
         lock.lock()
         guard pendingCount < 2 else { lock.unlock(); return false }
         pendingCount += 1
         lock.unlock()
         queue.async { [self] in
-            autoreleasepool { try? prepare(data, frame) }
+            autoreleasepool {
+                if let prepare { try? prepare(data, frame) }
+                else {
+                    let stitcher = FrameStitcher(options: options)
+                    if let prepared = try? stitcher.prepareFrame(at: frame, encodedData: data) {
+                        try? FramePreparationCache.store(prepared, for: frame)
+                    }
+                }
+            }
             lock.lock()
             pendingCount -= 1
             lock.unlock()

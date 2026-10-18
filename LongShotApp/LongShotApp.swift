@@ -128,7 +128,7 @@ final class LongShotApplicationDelegate: NSObject, UIApplicationDelegate, UNUser
             }
             print("LONGSHOT_BENCHMARK_BEGIN frames=\(frames.count)")
             let result = try await Task.detached(priority: .userInitiated) {
-                try FrameStitcher().stitch(
+                try FrameStitcher(options: latest.manifest.captureOptions ?? CaptureOptions()).stitch(
                     frameURLs: frames, sessionURL: destination, topCropRatio: cropRatio,
                     segmentStarts: latest.manifest.segmentStarts ?? []
                 )

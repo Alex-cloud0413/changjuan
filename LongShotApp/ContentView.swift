@@ -23,6 +23,8 @@ struct ContentView: View {
     @State private var showingFullPreview = false
     @State private var showingUsageGuide = false
     @State private var usageGuideIsInitial = false
+    @State private var showingSettings = false
+    @AppStorage(CaptureOptions.axisKey) private var captureAxis = CaptureAxis.vertical.rawValue
 
     private var language: AppLanguage { AppLanguage(rawValue: languageCode) ?? AppLanguage.initialLanguage }
 
@@ -45,6 +47,9 @@ struct ContentView: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showingSettings) {
+                CaptureSettingsView(model: model)
+            }
             .fullScreenCover(isPresented: fullPreviewBinding) {
                 LongImagePreview(urls: model.outputURLs)
             }
@@ -69,6 +74,11 @@ struct ContentView: View {
             } message: {
                 Text(language.text("已经保存到系统照片中的图片不会被删除。"))
             }
+            .alert(language.text("预览已不可用"), isPresented: $model.isSavedPreviewUnavailable) {
+                Button(language.text("关闭"), role: .cancel) {}
+            } message: {
+                Text(language.text("本地预览可能已自动清理，请到系统「照片」中查看已保存的长图。若已在照片中删除，长卷无法恢复。"))
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if model.isSavedThumbnailPresented,
                    !fullPreviewBinding.wrappedValue,
@@ -86,6 +96,13 @@ struct ContentView: View {
         .environment(\.appLanguage, language)
         .environment(\.locale, language.locale)
         .onAppear {
+#if LONGSHOT_UI_CHECKS
+            // Opt-in simulator snapshot route; excluded from ordinary builds.
+            if ProcessInfo.processInfo.arguments.contains("--snapshot-settings") {
+                showingSettings = true
+                return
+            }
+#endif
             guard !hasCompletedUsageGuide, !showingUsageGuide else { return }
             usageGuideIsInitial = true
             showingUsageGuide = true
@@ -107,6 +124,11 @@ struct ContentView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     contextualAction
+                    if captureAxis == CaptureAxis.horizontal.rawValue, !model.isBusy {
+                        Text(language.text("横向 · 左右滚动"))
+                            .font(.footnote)
+                            .foregroundStyle(ScrollPalette.secondaryInk)
+                    }
                 }
 
                 Button {
@@ -257,18 +279,30 @@ struct ContentView: View {
 
     private var brandHeader: some View {
         VStack(spacing: 13) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline) {
-                    brandName
-                    Spacer()
-                    brandCaption
-                }
+            HStack(alignment: .center, spacing: 12) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline) {
+                        brandName
+                        Spacer()
+                        brandCaption
+                    }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    brandName
-                    brandCaption
+                    VStack(alignment: .leading, spacing: 4) {
+                        brandName
+                        brandCaption
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Button { showingSettings = true } label: {
+                    Image(systemName: "gearshape")
+                        .font(.body.weight(.regular))
+                        .foregroundStyle(ScrollPalette.secondaryInk)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(language.text("设置"))
+                .accessibilityIdentifier("home.settings")
             }
 
             Rectangle()
@@ -562,7 +596,8 @@ private struct ZoomableLongImage: UIViewRepresentable {
         scrollView.delegate = context.coordinator
         scrollView.minimumZoomScale = 1
         scrollView.maximumZoomScale = 4
-        scrollView.alwaysBounceVertical = true
+        scrollView.alwaysBounceVertical = image.size.height >= image.size.width
+        scrollView.alwaysBounceHorizontal = image.size.width > image.size.height
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.backgroundColor = .systemBackground
 
@@ -601,9 +636,116 @@ private struct ZoomableLongImage: UIViewRepresentable {
 
         func layoutImage(in scrollView: UIScrollView, image: UIImage) {
             guard scrollView.bounds.width > 0, image.size.width > 0 else { return }
-            let fittedHeight = scrollView.bounds.width * image.size.height / image.size.width
-            imageView.frame = CGRect(x: 0, y: 0, width: scrollView.bounds.width, height: fittedHeight)
+            let wide = image.size.width > image.size.height
+            let scale = wide ? min(1, scrollView.bounds.height / image.size.height)
+                : scrollView.bounds.width / image.size.width
+            imageView.frame = CGRect(x: 0, y: 0, width: image.size.width * scale, height: image.size.height * scale)
             scrollView.contentSize = imageView.frame.size
+        }
+    }
+}
+
+struct CaptureSettingsView: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appLanguage) private var language
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @AppStorage(CaptureOptions.axisKey) private var axis = CaptureAxis.vertical.rawValue
+    @AppStorage(CaptureOptions.statusBarKey) private var keepsStatusBar = false
+    @State private var confirmingCleanup = false
+    @State private var cleanupMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Group {
+                        if dynamicTypeSize.isAccessibilitySize {
+                            directionPicker.pickerStyle(.inline)
+                        } else {
+                            directionPicker.pickerStyle(.segmented)
+                        }
+                    }
+                    .accessibilityIdentifier("settings.axis")
+                    .disabled(model.isBusy)
+                } header: {
+                    if !dynamicTypeSize.isAccessibilitySize { Text(language.text("拼接方向")) }
+                } footer: {
+                    Text(language.text("横向适合左右拖动的表格。一次录制只使用一种方向；更改仅影响新录制。"))
+                }
+                Section {
+                    Toggle(language.text("保留顶部状态栏"), isOn: $keepsStatusBar)
+                        .accessibilityIdentifier("settings.statusBar")
+                        .disabled(model.isBusy)
+                } footer: {
+                    Text(language.text("保留实际录制到的时间、信号和电量，也可能包含录制指示。默认关闭。"))
+                }
+                Section {
+                    Button(role: .destructive) { confirmingCleanup = true } label: {
+                        HStack {
+                            Text(language.text("清理所有缓存"))
+                            Spacer()
+                            if model.isClearingCaches { ProgressView() }
+                        }
+                    }
+                    .disabled(model.isBusy)
+                    .accessibilityIdentifier("settings.clearCache")
+                    if let cleanupMessage {
+                        Text(cleanupMessage).font(.footnote).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("settings.cleanupResult")
+                    }
+                } header: {
+                    Text(language.text("存储"))
+                } footer: {
+                    Text(language.text("仅清理原始画面和分析缓存，保留系统照片与已生成的本地预览。"))
+                }
+                if model.isBusy {
+                    Section {
+                        Text(language.text("请等待当前录制、整理或清理完成后再修改设置。"))
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(ScrollPalette.paper)
+            .navigationTitle(language.text("设置"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(language.text("完成")) { dismiss() }
+                }
+            }
+            .alert(language.text("清理所有缓存？"), isPresented: $confirmingCleanup) {
+                Button(language.text("清理缓存"), role: .destructive) {
+                    Task {
+                        guard let report = await model.clearAllRawCaches() else { return }
+                        if report.failures > 0 {
+                            cleanupMessage = language.text("部分缓存未能清理，请稍后重试。")
+                        } else if report.reclaimedBytes == 0 {
+                            cleanupMessage = language.text("没有可清理的缓存。")
+                        } else {
+                            let size = ByteCountFormatter.string(fromByteCount: report.reclaimedBytes, countStyle: .file)
+                            cleanupMessage = language.format("已清理 %@，照片和预览未删除。", size)
+                        }
+                    }
+                }
+                Button(language.text("取消"), role: .cancel) {}
+            } message: {
+                Text(language.text("这会删除所有原始画面和分析缓存，尚未保存的记录将无法重新整理。系统照片和已生成的本地预览不会被删除。此操作无法撤销。"))
+            }
+        }
+        .tint(ScrollPalette.ink)
+#if LONGSHOT_UI_CHECKS
+        .onAppear {
+            confirmingCleanup = ProcessInfo.processInfo.arguments.contains("--snapshot-cleanup-confirmation")
+        }
+#endif
+    }
+
+    private var directionPicker: some View {
+        Picker(language.text("拼接方向"), selection: $axis) {
+            Text(language.text("纵向")).tag(CaptureAxis.vertical.rawValue)
+            Text(language.text("横向")).tag(CaptureAxis.horizontal.rawValue)
         }
     }
 }
