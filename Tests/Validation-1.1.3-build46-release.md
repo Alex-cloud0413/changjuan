@@ -20,4 +20,8 @@ The independent public repository was freshly cloned from `a626a8c`; changes are
 
 ## Platform state
 
-Upload, GitHub push, review submission and public availability will be recorded separately after read-back. At this stage validation and installation are complete; platform submission is not yet confirmed.
+- Source commit `26ad213aa4ec4c9ee5a455d3e4aee9d69dcf3c34` was pushed to independent public repository `Alex-cloud0413/changjuan`. `git ls-remote` and a second clean clone confirmed the commit. All 25 allowlisted files matched byte-for-byte and all 101 source/config/test files matched the regression fingerprint.
+- Xcode reported upload success at 2026-10-20 02:12 GMT+8 and confirmed that Apple had begun processing the package. App and widget are 1.1.3 (46). This alone is not review submission.
+- Version 1.1.3 was created with updated Chinese release notes, accurate partial-output/storage disclosures and English review instructions. Existing screenshots, automatic release, immediate updates and existing ratings were retained. No price, region, review contact or privacy-collection setting was changed.
+- Apple finished processing Build 46; it was selected for 1.1.3 and saved. Review submission was completed and verified on 2026-10-20. Internal platform identifiers and detailed receipts are retained locally, not published in this repository.
+- Approval and public availability remain pending; 1.1.2 (42) remains the last verified public version. Automatic release is configured for after approval; submission is not publication.

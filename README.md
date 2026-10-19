@@ -4,7 +4,7 @@
 
 源码使用独立仓库 [Alex-cloud0413/changjuan](https://github.com/Alex-cloud0413/changjuan)；2026-10-18 实时核对为公开仓库，本轮不改变其可见性，不纳入 `life-os-workspace`。安装包、签名材料、测试录屏和临时输出不进入 Git。
 
-**公开版本：1.1.2（Build 42）；1.1.3（Build 46）正在准备发布。** 2026-10-20 实时回读 App Store Connect，1.1.2 已「可分发」。本轮用户授权将已安装的修正版推送并提交更新；Build 46 只在 Build 45 基础上调整发布版本号，功能源码不变。自动回归、真机算法回放、标准包安装与用户重新录制验收分别记录，不把上传或提交视为审核通过。修复证据见 [Build 45 本地验证](Tests/Validation-1.1.2-build45-local.md)，历史发布记录见 [Build 42](Tests/Validation-1.1.2-build42-release.md)。
+**公开版本：1.1.2（Build 42）；1.1.3（Build 46）已提交，等待审核。** 2026-10-20 已完成真机原位安装、27 项自动回归、独立 GitHub 推送及全新克隆校验；02:12（GMT+8）上传成功，Apple 处理完成后绑定 Build 46，02:32 正式提交并回读「等待审核」。沿用审核通过后自动发布、立即向所有用户更新与保留评分。Build 46 只在 Build 45 基础上调整发布版本号，功能源码不变。自动回归、真机算法回放、标准包安装与用户重新录制验收分别记录，不把提交视为审核通过。发布证据见 [Build 46 验证记录](Tests/Validation-1.1.3-build46-release.md)，修复详情见 [Build 45](Tests/Validation-1.1.2-build45-local.md)。
 
 当前产品为 iOS 27 专用体验：控制中心开始不跳 App、立即结束、快速整理、保存后可预览。默认启用 `LONGSHOT_SCREEN_CAPTURE_KIT`，使用 Xcode 27 RC 构建。工程与安装包已移除 ReplayKit Broadcast Upload / Setup UI 扩展；旧源码只作为未引用的历史文件保留。
 
