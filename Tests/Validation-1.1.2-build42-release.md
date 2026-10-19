@@ -16,3 +16,11 @@ Horizontal table alignment now tolerates repeated columns, small vertical drag j
 - Build 42 was installed in place on the connected iPhone and the installed version was read back. The user accepted the result and authorized GitHub and App Store submission on 2026-10-19.
 
 Device recordings, screenshots, device identifiers, detailed diagnostics, signing material and install packages remain outside the repository. App Store submission and public availability are recorded separately after platform read-back.
+
+## Release read-back — 2026-10-19
+
+- Source commit `25f51263a0d1b60db8cd4bf9276c5792acc4d965` was pushed to the independent `Alex-cloud0413/changjuan` repository. GitHub `main` was read back with `git ls-remote`; no app source was pushed to the workspace repository.
+- The clean release checkout matched the 26-gate report source fingerprint: `056a64969de032fe736740143f6b1cb9b6c67be4badd1de064928981d2ff9451`.
+- Xcode archive and App Store upload completed successfully. Apple processing finished; Build 42 was bound to version 1.1.2 and saved with updated release notes and review instructions.
+- App Store Connect confirmed one submitted item, **1.1.2 (42), Waiting for Review**, at 22:29 GMT+8. Automatic release on approval, immediate availability of the update and retention of existing ratings remain selected.
+- The existing public version was still 1.1.1. Review submission is not approval or public availability. Existing store screenshots were retained; no private user screenshots were uploaded.
