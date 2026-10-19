@@ -82,7 +82,8 @@ try {
   }
   for (const [name, level] of [
     ['regression-metrics', 'report-behavior'], ['home-icon-only', 'source-contract'],
-    ['capture-settings', 'source-contract'], ['capture-entry', 'source-contract'], ['app-language', 'native+source'],
+    ['capture-settings', 'source-contract'], ['capture-entry', 'source-contract'],
+    ['picker-lifecycle', 'native-with-picker-stubs'], ['capture-overlay', 'native-Vision+OCR-fallback'], ['app-language', 'native+source'],
     ['notification-authorization', 'native-with-system-stubs'], ['storage-cleanup', 'native+source'],
   ]) step(name, level, process.execPath, [`Tests/check-${name}.mjs`]);
 
@@ -94,11 +95,22 @@ try {
       'Shared/OverlapEstimator.swift', `Tests/${file}`, '-o', binary]);
     step(id, 'native-algorithm', binary, []);
   }
+  step('horizontal-table-matcher', 'native-algorithm', process.execPath,
+    ['Tests/check-horizontal-table-matcher.mjs']);
+  // Run the focused overlay gate before the longer capture/performance suite.
+  step('horizontal-floating-controls', 'native-algorithm+synthetic-visual', process.execPath,
+    ['Tests/check-horizontal-floating-controls.mjs', simulator]);
+  step('capture-pipeline-diagnostics', 'native-with-SCK-metadata-stubs', process.execPath,
+    ['Tests/check-capture-pipeline-diagnostics.mjs', simulator]);
   const captureLog = step('capture', 'optimized-simulator-behavior', process.execPath,
     ['Tests/check-capture-improvements.mjs', simulator], {
       LONGSHOT_STITCH_BASELINE: join(output, 'baseline-FrameStitcher.swift'),
       LONGSHOT_CACHE_BASELINE: join(output, 'baseline-FramePreparationCache.swift'),
     });
+  step('horizontal-spreadsheet', 'native-algorithm', process.execPath,
+    ['Tests/check-horizontal-spreadsheet.mjs', simulator]);
+  step('horizontal-table-jitter', 'native-algorithm', process.execPath,
+    ['Tests/check-horizontal-table-jitter.mjs', simulator]);
   const metricLines = captureLog.split('\n').filter(line => line.startsWith('LONGSHOT_PERF '));
   assert.equal(metricLines.length, 1, 'Missing or duplicate benchmark: never mark an absent benchmark passed');
   report.performanceSamples = JSON.parse(metricLines[0].slice('LONGSHOT_PERF '.length));
@@ -121,7 +133,9 @@ try {
   const widgetInfo = info(join(deviceApp, 'PlugIns/LongScrollWidgets.appex/Info.plist'));
   for (const key of ['CFBundleVersion', 'CFBundleShortVersionString', 'MinimumOSVersion']) assert.equal(appInfo[key], widgetInfo[key]);
   const executable = readFileSync(join(deviceApp, appInfo.CFBundleExecutable));
-  assert.ok(!executable.includes(Buffer.from('--snapshot-')), 'UI snapshot hooks must not enter standard Release');
+  for (const hook of ['--snapshot-', '--benchmark-latest', '--export-frames']) {
+    assert.ok(!executable.includes(Buffer.from(hook)), `Developer hook must not enter standard Release: ${hook}`);
+  }
   report.build = { version: appInfo.CFBundleShortVersionString, build: appInfo.CFBundleVersion,
     minimumOS: appInfo.MinimumOSVersion, signed: false, installedOnPhone: false };
   const simSDK = readCommand('xcrun', ['--sdk', 'iphonesimulator', '--show-sdk-path']);

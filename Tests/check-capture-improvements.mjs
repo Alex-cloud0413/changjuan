@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -37,7 +38,7 @@ if (first < 0 || last < 0) throw new Error("Cannot extract the production serial
 const extracted = join(work, "ProductionScreenFramePipeline.swift");
 writeFileSync(extracted, "import CoreImage\nimport CoreMedia\nimport Foundation\nimport ImageIO\nimport UIKit\n" + source.slice(first, last));
 const pipeline = compile("pipeline", [shared("CaptureConstants.swift"), shared("CaptureStorage.swift"),
-  shared("OverlapEstimator.swift"), app("FrameStitcher.swift"), app("FramePreparationCache.swift"), extracted,
+  shared("OverlapEstimator.swift"), shared("HorizontalTableMatcher.swift"), app("FrameStitcher.swift"), app("FramePreparationCache.swift"), extracted,
   join(testDirectory, "ScreenFramePipelineCheck.swift")], ["-D", "LONGSHOT_CAPTURE_CHECKS", "-D", "LONGSHOT_SCK_METADATA_STUB"]);
 run("xcrun", ["simctl", "spawn", simulator, pipeline]);
 const baselineSources = [];
@@ -55,12 +56,19 @@ if (process.env.LONGSHOT_STITCH_BASELINE) {
   writeFileSync(legacyFile, legacy);
   baselineSources.push(legacyFile);
   const legacyCache = join(work, "LegacyFramePreparationCache.swift");
-  writeFileSync(legacyCache, rename(readFileSync(process.env.LONGSHOT_CACHE_BASELINE, "utf8")));
+  // Keep independently generated legacy analysis beside, not over, the new
+  // cache revision. Both timed implementations must receive a warm cache.
+  const originalLegacyCache = rename(readFileSync(process.env.LONGSHOT_CACHE_BASELINE, "utf8"));
+  assert.ok(originalLegacyCache.includes('"Analysis-v1"'), 'Locate pinned baseline cache namespace before isolating it');
+  const isolatedLegacyCache = originalLegacyCache.replaceAll('"Analysis-v1"', '"LegacyAnalysis-v1"');
+  assert.ok(isolatedLegacyCache.includes('"LegacyAnalysis-v1"') && !isolatedLegacyCache.includes('"Analysis-v1"'),
+    'Legacy timing must never read or overwrite current analysis files');
+  writeFileSync(legacyCache, isolatedLegacyCache);
   baselineSources.push(legacyCache);
   baselineFlags.push("-D", "LONGSHOT_BASELINE_CHECKS");
 }
 const stitcher = compile("stitcher", [shared("CaptureConstants.swift"), shared("CaptureStorage.swift"),
-  shared("OverlapEstimator.swift"), app("FrameStitcher.swift"), app("FramePreparationCache.swift"),
+  shared("OverlapEstimator.swift"), shared("HorizontalTableMatcher.swift"), app("FrameStitcher.swift"), app("FramePreparationCache.swift"),
   ...baselineSources, join(testDirectory, "FrameStitcherBoundaryCheck.swift")],
   ["-D", "LONGSHOT_CAPTURE_CHECKS", ...baselineFlags]);
 run("xcrun", ["simctl", "spawn", simulator, stitcher, "--nonperiodic", ...(process.argv[3] ? [process.argv[3]] : [])]);
@@ -72,7 +80,7 @@ const preview = join(work, "ProductionPreview.swift");
 writeFileSync(preview, "import SwiftUI\nimport UIKit\n" + viewSource.slice(previewStart, previewEnd)
   .replace("private struct ZoomableLongImage:", "struct ZoomableLongImage:"));
 const options = compile("options", [shared("CaptureConstants.swift"), shared("CaptureStorage.swift"),
-  shared("OverlapEstimator.swift"), app("FrameStitcher.swift"), app("FramePreparationCache.swift"),
+  shared("OverlapEstimator.swift"), shared("HorizontalTableMatcher.swift"), app("FrameStitcher.swift"), app("FramePreparationCache.swift"),
   preview, join(testDirectory, "CaptureOptionsCheck.swift")], ["-D", "LONGSHOT_CAPTURE_CHECKS"]);
 run("xcrun", ["simctl", "spawn", simulator, options]);
 const visual = compile("visual", [shared("AppLanguage.swift"), shared("CaptureSystemIntegration.swift"),

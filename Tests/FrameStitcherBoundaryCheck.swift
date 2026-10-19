@@ -239,6 +239,18 @@ struct FrameStitcherBoundaryCheck {
         try compare([extra[1]] + frames + [extra[1]], "unrelated-boundaries")
         try compare(precision, "one-pixel-alignment")
 
+        // An app update can change sampling geometry or overlay detection
+        // without changing the source JPEG. Reject its old analysis revision.
+        let oldCacheURL = FramePreparationCache.cacheURL(for: frames[0])
+        let oldCacheBytes = try Data(contentsOf: oldCacheURL)
+        var oldPayload = try PropertyListSerialization.propertyList(from: oldCacheBytes, format: nil) as! [String: Any]
+        oldPayload["version"] = FramePreparationCache.version - 1
+        try PropertyListSerialization.data(fromPropertyList: oldPayload, format: .binary, options: 0)
+            .write(to: oldCacheURL, options: .atomic)
+        require(FramePreparationCache.load(for: frames[0]) == nil)
+        try compare(frames, "old-analysis-revision", expectedHits: frames.count - 1)
+        try oldCacheBytes.write(to: oldCacheURL, options: .atomic)
+
         // Only disposable fixture caches are corrupted/deleted here. Missing,
         // partial and stale caches must all fall back without shortening output.
         try FileManager.default.removeItem(at: FramePreparationCache.cacheURL(for: frames[0]))
@@ -284,6 +296,10 @@ struct FrameStitcherBoundaryCheck {
         require(previous.coarseHeight == current.coarseHeight && previous.coarsePixels == current.coarsePixels)
         require(previous.alignmentHeight == current.alignmentHeight && previous.alignmentPixels == current.alignmentPixels)
         require(previous.coveredTop == current.coveredTop && previous.isSystemPanel == current.isSystemPanel)
+        require(LegacyFramePreparationCache.cacheURL(for: url) != FramePreparationCache.cacheURL(for: url))
+        require(previous.version == LegacyFramePreparationCache.version && current.version == FramePreparationCache.version)
+        try LegacyFramePreparationCache.store(previous, for: url)
+        require(LegacyFramePreparationCache.load(for: url) != nil)
     }
 #endif
 
@@ -378,6 +394,9 @@ struct FrameStitcherBoundaryCheck {
         let prepared = try FrameStitcher().stitch(
             frameURLs: pages, sessionURL: directory.appendingPathComponent("full-size-prepared"), segmentStarts: boundaries
         )
+#if LONGSHOT_BASELINE_CHECKS
+        require(baseline.preparedFrameCount == pages.count)
+#endif
         require(prepared.preparedFrameCount == pages.count)
         require(prepared.acceptedFrameCount == baseline.acceptedFrameCount)
         require(prepared.skippedFrameCount == baseline.skippedFrameCount)

@@ -28,7 +28,9 @@ struct PreparedFrame: Codable {
 }
 
 enum FramePreparationCache {
-    static let version = 1
+    // Sampling geometry and system-panel classification are part of the
+    // derived payload. Never reuse analysis produced by the older matcher.
+    static let version = 2
 
     static func cacheURL(for frame: URL) -> URL {
         frame.deletingLastPathComponent().appendingPathComponent("Analysis-v1", isDirectory: true)
@@ -61,7 +63,7 @@ enum FramePreparationCache {
               prepared.imageHeight > 0, prepared.imageHeight <= 16_384,
               prepared.coarseHeight >= 96, prepared.coarseHeight <= 16_384,
               prepared.alignmentHeight > 0, prepared.alignmentHeight <= 16_384,
-              (prepared.sampleWidth ?? 72) == (axis == .horizontal ? 192 : 72),
+              (prepared.sampleWidth ?? 72) == (axis == .horizontal ? 384 : 72),
               prepared.coarsePixels.count == (prepared.sampleWidth ?? 72) * prepared.coarseHeight,
               prepared.alignmentPixels.count == (prepared.sampleWidth ?? 72) * prepared.alignmentHeight,
               prepared.coveredTop.isFinite, prepared.coveredTop >= 0,

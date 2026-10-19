@@ -58,8 +58,13 @@ struct CaptureOptionsCheck {
         }
         let originals = try frames.map { try Data(contentsOf: $0) }
         func stitch(_ inputs: [URL], _ name: String, keep: Bool = false, cached: Bool = true, boundaries: [Int] = []) throws -> StitchResult {
-            try FrameStitcher(usePreparedFrames: cached, options: CaptureOptions(axis: .horizontal, keepsStatusBar: keep))
-                .stitch(frameURLs: inputs, sessionURL: root.appendingPathComponent(name), segmentStarts: boundaries)
+            do {
+                return try FrameStitcher(usePreparedFrames: cached, options: CaptureOptions(axis: .horizontal, keepsStatusBar: keep))
+                    .stitch(frameURLs: inputs, sessionURL: root.appendingPathComponent(name), segmentStarts: boundaries)
+            } catch {
+                FileHandle.standardError.write(Data(("Capture options fixture \(name) rejected after \(checks) assertions; \(root.path)\n").utf8))
+                throw error
+            }
         }
         let forward = try stitch(frames, "forward", cached: false)
         let output = UIImage(contentsOfFile: forward.outputURLs[0].path)!

@@ -19,6 +19,7 @@
 		B00000000000000000000007 /* CaptureConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000007 /* CaptureConstants.swift */; };
 		B00000000000000000000008 /* CaptureStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000008 /* CaptureStorage.swift */; };
 		B00000000000000000000009 /* OverlapEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000009 /* OverlapEstimator.swift */; };
+		B00000000000000000000056 /* HorizontalTableMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000056 /* HorizontalTableMatcher.swift */; };
 		B00000000000000000000015 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000022 /* Assets.xcassets */; };
 		B00000000000000000000016 /* ScreenCaptureCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000023 /* ScreenCaptureCoordinator.swift */; };
 		B00000000000000000000017 /* CaptureSystemIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000024 /* CaptureSystemIntegration.swift */; };
@@ -75,6 +76,7 @@
 		C00000000000000000000007 /* CaptureConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureConstants.swift; sourceTree = "<group>"; };
 		C00000000000000000000008 /* CaptureStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureStorage.swift; sourceTree = "<group>"; };
 		C00000000000000000000009 /* OverlapEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlapEstimator.swift; sourceTree = "<group>"; };
+		C00000000000000000000056 /* HorizontalTableMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HorizontalTableMatcher.swift; sourceTree = "<group>"; };
 		C00000000000000000000011 /* LongShot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LongShot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C00000000000000000000013 /* App.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = App.xcconfig; sourceTree = "<group>"; };
 		C00000000000000000000015 /* Shared.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Shared.xcconfig; sourceTree = "<group>"; };
@@ -156,6 +158,7 @@
 				C00000000000000000000024 /* CaptureSystemIntegration.swift */,
 				C00000000000000000000008 /* CaptureStorage.swift */,
 				C00000000000000000000009 /* OverlapEstimator.swift */,
+				C00000000000000000000056 /* HorizontalTableMatcher.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -313,6 +316,7 @@
 				B00000000000000000000017 /* CaptureSystemIntegration.swift in Sources */,
 				B00000000000000000000008 /* CaptureStorage.swift in Sources */,
 				B00000000000000000000009 /* OverlapEstimator.swift in Sources */,
+				B00000000000000000000056 /* HorizontalTableMatcher.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -369,7 +373,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C00000000000000000000013 /* App.xcconfig */;
 			buildSettings = {
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 42;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 1.1.2;
@@ -383,7 +387,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C00000000000000000000013 /* App.xcconfig */;
 			buildSettings = {
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 42;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 1.1.2;
@@ -398,7 +402,7 @@
 			baseConfigurationReference = C0000000000000000000002B /* Widgets.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 42;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
 				MARKETING_VERSION = 1.1.2;
@@ -414,7 +418,7 @@
 			baseConfigurationReference = C0000000000000000000002B /* Widgets.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 42;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
 				MARKETING_VERSION = 1.1.2;

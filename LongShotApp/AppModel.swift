@@ -119,16 +119,28 @@ final class AppModel: ObservableObject {
 
 #if LONGSHOT_SCREEN_CAPTURE_KIT
     func performSystemCaptureAction(finishOnly: Bool) async throws {
+        CaptureProcessingDiagnostics.record("systemCaptureActionRequested", values: [
+            "finishOnly": finishOnly, "busy": isBusy,
+            "capturing": captureCoordinator.isCapturing,
+            "choosingSource": captureCoordinator.isChoosingSource
+        ])
         _ = CaptureCommandStore.consumeStartRequest()
         CaptureCommandStore.clearFinishRequest()
         updateHostVisibility()
         if captureCoordinator.isCapturing {
             await stopCapture()
         } else if captureCoordinator.isChoosingSource {
-            if !finishOnly { await captureCoordinator.waitForPickerResolution() }
+            if !finishOnly {
+                captureCoordinator.presentPicker()
+                try await captureCoordinator.waitForPickerResolution()
+            }
         } else if !finishOnly, !isBusy {
             beginCapture()
-            await captureCoordinator.waitForPickerResolution()
+            try await captureCoordinator.waitForPickerResolution()
+        } else {
+            CaptureProcessingDiagnostics.record("systemCaptureActionSkipped", values: [
+                "finishOnly": finishOnly, "busy": isBusy
+            ])
         }
     }
 

@@ -14,7 +14,7 @@ struct CaptureReplayCheck {
         let manifest = try decoder.decode(CaptureManifest.self, from: Data(contentsOf: fixture.appendingPathComponent("manifest.json")))
         var traces: [String] = []
         FrameStitcher.alignmentTrace = { traces.append($0); print($0) }
-        let result = try FrameStitcher().stitch(
+        let result = try FrameStitcher(options: manifest.captureOptions ?? CaptureOptions()).stitch(
             frameURLs: CaptureStorage.frameURLs(in: fixture), sessionURL: output,
             topCropRatio: manifest.topCropRatio ?? 0.075, segmentStarts: manifest.segmentStarts ?? []
         )
@@ -22,6 +22,12 @@ struct CaptureReplayCheck {
         for url in result.outputURLs {
             let image = UIImage(contentsOfFile: url.path)!.cgImage!
             print("output=\(url.path) size=\(image.width)x\(image.height)")
+            if let flag = CommandLine.arguments.firstIndex(of: "--expect-size"), flag + 2 < CommandLine.arguments.count {
+                guard image.width == Int(CommandLine.arguments[flag + 1]),
+                      image.height == Int(CommandLine.arguments[flag + 2]) else {
+                    fatalError("Output extent differs from independently verified fixture geometry")
+                }
+            }
         }
         if let flag = CommandLine.arguments.firstIndex(of: "--expect-edge"), flag + 3 < CommandLine.arguments.count {
             let from = CommandLine.arguments[flag + 1], to = CommandLine.arguments[flag + 2]

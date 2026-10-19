@@ -52,7 +52,8 @@ final class ScreenCaptureCoordinator: NSObject {
     private var isStopping = false
     private var pickerBackgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var awaitingPicker = false
-    private var pickerWaiters: [CheckedContinuation<Void, Never>] = []
+    private var pickerWaiters: [CheckedContinuation<Void, Error>] = []
+    private var pickerFailure: Error?
 
     var isChoosingSource: Bool { awaitingPicker }
     var isPausedForNextPage: Bool { captureQueue.sync { pipeline.isPausedForNextPage } }
@@ -62,15 +63,26 @@ final class ScreenCaptureCoordinator: NSObject {
     }
 
     func presentPicker() {
-        guard !awaitingPicker, !isStarting, !isStopping, stream == nil else { return }
+        guard !isStarting, !isStopping, stream == nil else {
+            recordEvent("requestBlocked", detail: "starting=\(isStarting),stopping=\(isStopping),stream=\(stream != nil)")
+            return
+        }
+        if awaitingPicker {
+            // A second explicit tap retries a presentation lost by the system;
+            // keep the same generation, observer and consent waiters.
+            recordEvent("represent")
+            picker.present(using: .display)
+            return
+        }
+        pickerFailure = nil
         captureGeneration = UUID()
         recordEvent("request")
         guard picker.isAvailable else {
+            let message = "这台设备当前不允许屏幕捕获，请检查系统的屏幕录制限制。"
+            pickerFailure = NSError(domain: "com.gaoyiming.longshot.capture", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: message])
             recordEvent("unavailable")
-            delegate?.screenCaptureCoordinator(
-                self,
-                didFailWith: "这台设备当前不允许屏幕捕获，请检查系统的屏幕录制限制。"
-            )
+            delegate?.screenCaptureCoordinator(self, didFailWith: message)
             return
         }
 
@@ -82,7 +94,7 @@ final class ScreenCaptureCoordinator: NSObject {
         let observer = ScreenCapturePickerObserver(owner: self, generation: captureGeneration)
         pickerObserver = observer
         picker.add(observer)
-        picker.isActive = true
+        if !picker.isActive { picker.isActive = true }
 
         awaitingPicker = true
         beginPickerBackgroundTask()
@@ -93,16 +105,23 @@ final class ScreenCaptureCoordinator: NSObject {
 
     /// Keep the background LiveActivityIntent running through system consent,
     /// not merely until present() returns. This does not accept consent for the user.
-    func waitForPickerResolution() async {
-        guard awaitingPicker else { return }
-        await withCheckedContinuation { pickerWaiters.append($0) }
+    func waitForPickerResolution() async throws {
+        guard awaitingPicker else {
+            if let pickerFailure { throw pickerFailure }
+            return
+        }
+        try await withCheckedThrowingContinuation { pickerWaiters.append($0) }
     }
 
-    private func resolvePicker() {
+    private func resolvePicker(error: Error? = nil) {
         awaitingPicker = false
+        pickerFailure = error
         let waiters = pickerWaiters
         pickerWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
+        for waiter in waiters {
+            if let error { waiter.resume(throwing: error) }
+            else { waiter.resume() }
+        }
     }
 
     func stopCapture() async {
@@ -220,11 +239,20 @@ final class ScreenCaptureCoordinator: NSObject {
             _ = pipeline.failSession(with: message)
             return pipeline.finishSession(autoStopped: false, trimTrailingFrames: false)
         }
+        if let completion {
+            CaptureProcessingDiagnostics.record("capturePipelineSnapshot",
+                sessionID: completion.url.lastPathComponent,
+                values: completion.diagnostics)
+        }
         let currentStream = stream
         stream = nil
         if stopStream, let currentStream { try? await currentStream.stopCapture() }
         recordEvent(cancelled ? "cancelled" : "error", detail: message)
-        deactivatePicker()
+        let pickerError = cancelled ? nil : NSError(
+            domain: "com.gaoyiming.longshot.capture", code: 4,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
+        deactivatePicker(error: pickerError)
         isStopping = false
 
         if cancelled {
@@ -306,6 +334,11 @@ final class ScreenCaptureCoordinator: NSObject {
                 trimTrailingFrames: trimTrailingFrames
             )
         }
+        if let completion {
+            CaptureProcessingDiagnostics.record("capturePipelineSnapshot",
+                sessionID: completion.url.lastPathComponent,
+                values: completion.diagnostics)
+        }
         recordEvent("stopped", detail: completion.map { "frames=\($0.manifest.frameCount)" })
         deactivatePicker()
         isStopping = false
@@ -318,10 +351,12 @@ final class ScreenCaptureCoordinator: NSObject {
         )
     }
 
-    private func deactivatePicker() {
-        resolvePicker()
+    private func deactivatePicker(error: Error? = nil) {
+        resolvePicker(error: error)
         endPickerBackgroundTask()
-        picker.isActive = false
+        // isActive registers the singleton with system sharing UI; it is not
+        // the stream's running state. Keep registration through repeat captures
+        // rather than tearing it down and re-enabling it in a background intent.
         if let pickerObserver { picker.remove(pickerObserver) }
         pickerObserver = nil
     }
@@ -368,7 +403,10 @@ final class ScreenCaptureCoordinator: NSObject {
                 "event": name,
                 "timestamp": ISO8601DateFormatter().string(from: Date()),
                 "generation": captureGeneration.uuidString,
-                "applicationState": String(UIApplication.shared.applicationState.rawValue)
+                "applicationState": String(UIApplication.shared.applicationState.rawValue),
+                "appBuild": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                "pickerActive": String(picker.isActive),
+                "awaitingPicker": String(awaitingPicker)
             ]
             if let detail { event["detail"] = detail }
             events.append(event)
@@ -551,6 +589,115 @@ final class ScreenCaptureHostVisibility: @unchecked Sendable {
     }
 }
 
+/// Bounded, content-free counters owned exclusively by the serial capture queue.
+/// No per-frame file I/O, hashes, screen text or image paths are collected.
+struct ScreenFramePipelineDiagnostics {
+    enum Rejection: String, CaseIterable {
+        case sealed, finishRequest, paused, hostForeground, invalidBuffer, notReady
+        case incompleteStatus, throttled, missingImage, encoding, writeFailed
+    }
+
+    private let beganAt = ProcessInfo.processInfo.systemUptime
+    private(set) var callbackCount = 0
+    private(set) var accepted = 0
+    private var rejected: [String: Int] = [:]
+    private var statuses: [String: Int] = [:]
+    private var firstPTS: Double?
+    private var lastPTS: Double?
+    private var previousPTS: CMTime?
+    private var invalidPTS = 0
+    private var nonfinitePTS = 0
+    private var backwardPTS = 0
+    private var repeatedPTS = 0
+    private var epochChanges = 0
+    private var maximumPTSGap: Double = 0
+    private var zeroDeltaFromSaved = 0
+    private var negativeDeltaFromSaved = 0
+    private var maximumCallbackGap: Double = 0
+    private var firstCallbackAt: Double?
+    private var previousCallbackAt: Double?
+    private var samples: [[String: Any]] = []
+
+    mutating func observeCallback(presentationTime: CMTime, lastSavedTime: CMTime?) {
+        callbackCount += 1
+        let now = ProcessInfo.processInfo.systemUptime
+        if firstCallbackAt == nil { firstCallbackAt = now }
+        if let previousCallbackAt {
+            maximumCallbackGap = max(maximumCallbackGap, now - previousCallbackAt)
+        }
+        previousCallbackAt = now
+        guard presentationTime.isValid else { invalidPTS += 1; return }
+        let seconds = CMTimeGetSeconds(presentationTime)
+        guard seconds.isFinite else { nonfinitePTS += 1; return }
+        if firstPTS == nil { firstPTS = seconds }
+        lastPTS = seconds
+        if let previousPTS {
+            if previousPTS.epoch != presentationTime.epoch {
+                epochChanges += 1
+            } else {
+                let delta = CMTimeGetSeconds(presentationTime - previousPTS)
+                if delta.isFinite {
+                    if delta < 0 { backwardPTS += 1 }
+                    if delta == 0 { repeatedPTS += 1 }
+                    maximumPTSGap = max(maximumPTSGap, delta)
+                }
+            }
+        }
+        previousPTS = presentationTime
+        if let lastSavedTime, lastSavedTime.isValid {
+            let delta = CMTimeGetSeconds(presentationTime - lastSavedTime)
+            if delta.isFinite {
+                if delta == 0 { zeroDeltaFromSaved += 1 }
+                if delta < 0 { negativeDeltaFromSaved += 1 }
+            }
+        }
+    }
+
+    mutating func reject(_ reason: Rejection) {
+        rejected[reason.rawValue, default: 0] += 1
+    }
+
+    mutating func observeStatus(_ status: String) {
+        statuses[status, default: 0] += 1
+    }
+
+    mutating func accept(index: Int, presentationTime: CMTime, width: Int, height: Int, bytes: Int) {
+        accepted += 1
+        guard samples.count < 12 else { return }
+        var sample: [String: Any] = ["index": index,
+            "uptimeOffset": ProcessInfo.processInfo.systemUptime - beganAt,
+            "width": width, "height": height, "jpegBytes": bytes]
+        let seconds = CMTimeGetSeconds(presentationTime)
+        if presentationTime.isValid, seconds.isFinite { sample["presentationTime"] = seconds }
+        sample["presentationTimeEpoch"] = presentationTime.epoch
+        samples.append(sample)
+    }
+
+    func snapshot() -> [String: Any] {
+        var counts = Dictionary(uniqueKeysWithValues: Rejection.allCases.map {
+            ($0.rawValue, rejected[$0.rawValue, default: 0])
+        })
+        counts["accepted"] = accepted
+        let now = ProcessInfo.processInfo.systemUptime
+        var result: [String: Any] = ["schemaVersion": 1, "callbackCount": callbackCount, "counts": counts,
+            "frameStatusCounts": statuses, "wallSeconds": now - beganAt,
+            "invalidPTSCount": invalidPTS, "nonfinitePTSCount": nonfinitePTS,
+            "backwardPTSCount": backwardPTS, "repeatedPTSCount": repeatedPTS,
+            "ptsEpochChangeCount": epochChanges, "maximumPTSGap": maximumPTSGap,
+            "zeroDeltaFromSavedCount": zeroDeltaFromSaved,
+            "negativeDeltaFromSavedCount": negativeDeltaFromSaved,
+            "maximumCallbackGap": maximumCallbackGap, "acceptedSamples": samples]
+        if let firstPTS { result["firstPresentationTime"] = firstPTS }
+        if let lastPTS { result["lastPresentationTime"] = lastPTS }
+        if let firstCallbackAt { result["firstCallbackOffset"] = firstCallbackAt - beganAt }
+        if let previousCallbackAt {
+            result["lastCallbackOffset"] = previousCallbackAt - beganAt
+            result["lastCallbackAgeSeconds"] = now - previousCallbackAt
+        }
+        return result
+    }
+}
+
 final class ScreenFramePipeline: @unchecked Sendable {
     enum Event {
         case none
@@ -562,6 +709,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
     struct Completion {
         let url: URL
         let manifest: CaptureManifest
+        let diagnostics: [String: Any]
     }
 
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
@@ -573,6 +721,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
     private var frameIndex = 0
     private var lastSavedPresentationTime: CMTime?
     private var hasRequestedFinish = false
+    private var diagnostics = ScreenFramePipelineDiagnostics()
     private(set) var isPausedForNextPage = false
 
     init(preprocessor: FramePreprocessor = FramePreprocessor(), hostIsForeground: @escaping @Sendable () -> Bool = {
@@ -598,43 +747,47 @@ final class ScreenFramePipeline: @unchecked Sendable {
         lastSavedPresentationTime = nil
         hasRequestedFinish = false
         isPausedForNextPage = false
+        diagnostics = ScreenFramePipelineDiagnostics()
         CaptureCommandStore.clearFinishRequest()
         return session.0
     }
 
     func consume(_ sampleBuffer: CMSampleBuffer) -> Event {
-        guard !hasRequestedFinish else { return .none }
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        diagnostics.observeCallback(presentationTime: presentationTime, lastSavedTime: lastSavedPresentationTime)
+        guard !hasRequestedFinish else { diagnostics.reject(.sealed); return .none }
 
         if CaptureCommandStore.consumeFinishRequest() {
+            diagnostics.reject(.finishRequest)
             hasRequestedFinish = true
             return .shouldStop(autoStopped: false, trimTrailingFrames: true)
         }
 
-        guard !isPausedForNextPage else { return .none }
+        guard !isPausedForNextPage else { diagnostics.reject(.paused); return .none }
 
         // Exclude our actual foreground UI, rather than losing a fixed amount
         // of useful content at the beginning and end of every capture.
-        guard !hostIsForeground() else { return .none }
+        guard !hostIsForeground() else { diagnostics.reject(.hostForeground); return .none }
 
-        guard let sessionURL,
-              CMSampleBufferIsValid(sampleBuffer),
-              CMSampleBufferDataIsReady(sampleBuffer),
-              isCompleteFrame(sampleBuffer) else { return .none }
+        guard let sessionURL else { diagnostics.reject(.notReady); return .none }
+        guard CMSampleBufferIsValid(sampleBuffer) else { diagnostics.reject(.invalidBuffer); return .none }
+        guard CMSampleBufferDataIsReady(sampleBuffer) else { diagnostics.reject(.notReady); return .none }
+        guard isCompleteFrame(sampleBuffer) else { diagnostics.reject(.incompleteStatus); return .none }
 
-        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if let lastSavedPresentationTime,
            presentationTime.isValid,
            lastSavedPresentationTime.isValid,
            CMTimeGetSeconds(presentationTime - lastSavedPresentationTime)
                < CaptureConstants.frameInterval {
+            diagnostics.reject(.throttled)
             return .none
         }
 
         return autoreleasepool {
-            guard let image = makeImage(from: sampleBuffer) else { return .none }
+            guard let image = makeImage(from: sampleBuffer) else { diagnostics.reject(.missingImage); return .none }
 
             do {
-                guard let data = image.jpegData(compressionQuality: 0.9) else { return .none }
+                guard let data = image.jpegData(compressionQuality: 0.9) else { diagnostics.reject(.encoding); return .none }
                 let url = CaptureStorage.frameURL(index: frameIndex, sessionURL: sessionURL)
                 try data.write(to: url, options: .atomic)
                 frameIndex += 1
@@ -643,10 +796,13 @@ final class ScreenFramePipeline: @unchecked Sendable {
                     try CaptureStorage.write(manifest, to: sessionURL)
                 }
                 lastSavedPresentationTime = presentationTime
+                diagnostics.accept(index: frameIndex - 1, presentationTime: presentationTime,
+                    width: image.cgImage?.width ?? 0, height: image.cgImage?.height ?? 0, bytes: data.count)
                 // The full-quality JPEG is already committed. A slow or full
                 // preparation queue never drops capture frames or delays finish.
                 preprocessor.enqueue(data, for: url, options: manifest?.captureOptions ?? CaptureOptions())
             } catch {
+                diagnostics.reject(.writeFailed)
                 let message = error.localizedDescription
                 _ = failSession(with: message)
                 return .failed(message)
@@ -699,7 +855,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
         }
 
         try? CaptureStorage.write(manifest, to: sessionURL)
-        let completion = Completion(url: sessionURL, manifest: manifest)
+        let completion = Completion(url: sessionURL, manifest: manifest, diagnostics: diagnostics.snapshot())
         reset()
         return completion
     }
@@ -714,7 +870,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
         try? CaptureStorage.write(manifest, to: sessionURL)
         self.manifest = manifest
         hasRequestedFinish = true
-        return Completion(url: sessionURL, manifest: manifest)
+        return Completion(url: sessionURL, manifest: manifest, diagnostics: diagnostics.snapshot())
     }
 
     private func reset() {
@@ -730,6 +886,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
 #if LONGSHOT_SCK_METADATA_STUB
         // Standalone JPEG/queue checks on an older simulator cannot load SCK.
         // Release builds always validate the actual ScreenCaptureKit metadata.
+        diagnostics.observeStatus("metadataStub")
         return true
 #else
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
@@ -737,10 +894,12 @@ final class ScreenFramePipeline: @unchecked Sendable {
             createIfNecessary: false
         ) as? [[SCStreamFrameInfo: Any]],
         let attachment = attachments.first,
-        let rawStatus = attachment[.status] as? Int,
-        let status = SCFrameStatus(rawValue: rawStatus) else {
+        let rawStatus = attachment[.status] as? Int else {
+            diagnostics.observeStatus("missing")
             return true
         }
+        diagnostics.observeStatus(String(rawStatus))
+        guard let status = SCFrameStatus(rawValue: rawStatus) else { return true }
         return status == .complete || status == .started
 #endif
     }
