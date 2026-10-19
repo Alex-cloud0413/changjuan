@@ -88,6 +88,7 @@ final class ResultNotificationManager {
         sessionURL: URL,
         sessionID: String,
         pageCount: Int,
+        omittedOccludedBottomRows: Bool = false,
         mayRequestAuthorization: Bool = false
     ) async {
         guard postingSessionIDs.insert(sessionID).inserted else { return }
@@ -135,6 +136,10 @@ final class ResultNotificationManager {
         let language = AppLanguage.current
         content.title = pageCount > 1 ? language.format("长卷已保存为 %ld 张长图", pageCount) : language.text("长卷已保存")
         content.body = language.text("轻点预览刚刚生成的长图")
+        if omittedOccludedBottomRows {
+            content.title = language.text("长卷已保存（部分内容）")
+            content.body = language.text("底部遮挡行未收录，轻点查看")
+        }
         content.threadIdentifier = "longshot-results"
         content.userInfo = [Self.sessionIDKey: sessionID]
 

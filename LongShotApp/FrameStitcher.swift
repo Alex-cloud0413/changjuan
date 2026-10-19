@@ -38,6 +38,7 @@ struct StitchResult {
     let timings: StitchTimings
     let preparedFrameCount: Int
     let preparedAlignmentCount: Int
+    var omittedOccludedBottomRows = false
 }
 
 struct StitchTimings: Codable {
@@ -55,6 +56,17 @@ final class FrameStitcher {
     private struct Piece {
         let frameURL: URL?
         let sourceRect: CGRect
+        var segmentID: Int? = nil
+    }
+
+    private struct HorizontalSegmentPlan {
+        let frames: [(url: URL, offset: CGFloat)]
+        let frozenLeadingPixels: Int
+        let grid: HorizontalGridRegistration?
+    }
+
+    private struct HorizontalOverlayGap: Error {
+        let top: CGFloat
     }
 
     private struct FrameSample {
@@ -84,6 +96,12 @@ final class FrameStitcher {
         let body: GrayFrame
     }
 
+    private struct HorizontalIdentityBand {
+        let top: Int
+        let bottom: Int
+        let bodyBottom: Int
+    }
+
     /// Registration is deliberately limited to a proven regular table grid.
     /// Header controls are not part of this small accidental cross-axis drag.
     private struct HorizontalGridRegistration {
@@ -103,7 +121,8 @@ final class FrameStitcher {
             let peaks: [Int]
         }
 
-        static func detect(_ urls: [URL], height: Int, statusHeight: Int) throws -> HorizontalGridRegistration? {
+        static func detect(_ urls: [URL], height: Int, statusHeight: Int,
+                           identityBand: inout HorizontalIdentityBand?) throws -> HorizontalGridRegistration? {
             guard urls.count >= 2, height >= 300 else { return nil }
             let width = 192
             func profile(_ url: URL) -> Profile? {
@@ -162,6 +181,21 @@ final class FrameStitcher {
             var fixedBottom = 0
             while fixedBottom < height / 5, unchanged(height - fixedBottom - 1) { fixedBottom += 1 }
             let bottomHint = fixedBottom > 2 ? height - fixedBottom + 2 : nil
+            // The first moving visual band can identify columns even without
+            // a regular row grid or frozen header divider. Detect its bounds
+            // from temporal pixels, not a fixed crop or an app-specific label.
+            if firstMoving < height / 4 {
+                var end = firstMoving + max(8, height / 180)
+                let limit = min(height / 3, firstMoving + height / 12)
+                while end < limit {
+                    if (0..<3).allSatisfy({ unchanged(end + $0) }) { break }
+                    end += 1
+                }
+                if end - headerTop >= 12 {
+                    identityBand = HorizontalIdentityBand(top: headerTop, bottom: end + 1,
+                        bodyBottom: min(height, bottomHint ?? height))
+                }
+            }
             let central = anchor.peaks.filter { $0 >= Int(Double(height) * 0.22) && $0 < Int(Double(height) * 0.73) }
             guard central.count >= 8 else { return nil }
             let gaps = zip(central, central.dropFirst()).map { $1 - $0 }
@@ -312,14 +346,24 @@ final class FrameStitcher {
     // Keep common tab bars, coupon strips, and floating purchase rails out of
     // every appended slice. The final frame adds this viewport-fixed area once.
     private var bottomInsetRatio: CGFloat { options.axis == .horizontal ? 0 : 0.19 }
-    private let maximumOutputHeight: CGFloat = 16_000
+    private let maximumOutputHeight: CGFloat
     private let usePreparedFrames: Bool
     private let options: CaptureOptions
 
     init(usePreparedFrames: Bool = true, options: CaptureOptions = CaptureOptions()) {
         self.usePreparedFrames = usePreparedFrames
         self.options = options
+        self.maximumOutputHeight = 16_000
     }
+
+#if LONGSHOT_CAPTURE_CHECKS
+    init(usePreparedFrames: Bool = true, options: CaptureOptions, testPageLimit: CGFloat) {
+        precondition(testPageLimit >= 1)
+        self.usePreparedFrames = usePreparedFrames
+        self.options = options
+        self.maximumOutputHeight = testPageLimit
+    }
+#endif
 
     func stitch(
         frameURLs: [URL],
@@ -372,14 +416,29 @@ final class FrameStitcher {
         // one 1-D transform cannot represent their different motion. Cached
         // samples remain derived from the unchanged original JPEG.
         var gridByIndex: [Int: HorizontalGridRegistration] = [:]
-        var gridByURL: [URL: HorizontalGridRegistration] = [:]
         var gridMasksByIndex: [Int: [CGRect]] = [:]
         var tableHeaderTopByIndex: [Int: Int] = [:]
+        var identityMatchingByIndex: [Int: HorizontalGridRegistration] = [:]
         if options.axis == .horizontal {
             for range in ranges {
                 let indices = range.filter { !samples[$0].isSystemPanel }
-                guard let registration = try HorizontalGridRegistration.detect(indices.map { samples[$0].url },
-                    height: Int(width), statusHeight: Int(min(floor(width * 0.075), ceil(width * max(0, topCropRatio))))) else { continue }
+                var identity: HorizontalIdentityBand?
+                let detected = try HorizontalGridRegistration.detect(indices.map { samples[$0].url },
+                    height: Int(width), statusHeight: Int(min(floor(width * 0.075), ceil(width * max(0, topCropRatio)))),
+                    identityBand: &identity)
+                guard let registration = detected else {
+                    if let identity {
+                        let bodyTop = identity.bottom + 3
+                        let matching = HorizontalGridRegistration(headerTop: identity.top,
+                            rowPeriod: identity.bottom - identity.top, top: bodyTop, bottom: identity.bodyBottom,
+                            commonTop: bodyTop, commonBottom: identity.bodyBottom, shifts: [:])
+                        for index in indices {
+                            identityMatchingByIndex[index] = matching
+                            tableHeaderTopByIndex[index] = identity.top
+                        }
+                    }
+                    continue
+                }
 #if LONGSHOT_CAPTURE_CHECKS
                 Self.alignmentTrace?("table layers header=\(registration.headerTop)..<\(registration.top) bodyEnd=\(registration.bottom) y=\(registration.shifts.values.min() ?? 0)..\(registration.shifts.values.max() ?? 0)")
 #endif
@@ -391,16 +450,36 @@ final class FrameStitcher {
                             .union(mask.offsetBy(dx: 0, dy: -maximumShift))
                     }
                 for index in indices {
-                    let sample = samples[index]
                     gridByIndex[index] = registration
-                    gridByURL[sample.url] = registration
                     gridMasksByIndex[index] = masks
                     tableHeaderTopByIndex[index] = registration.headerTop + 2
                 }
             }
         }
 
+        // A frozen pane is a session-level layer, not a fixed percentage of
+        // the screen. Reuse this one boundary in matching, coverage and repair.
+        var motionByIndex: [Int: HorizontalMotionLayout] = [:]
+        if options.axis == .horizontal {
+            for range in ranges {
+                let indices = range.filter { !samples[$0].isSystemPanel }
+                var evidence = HorizontalMotionLayout.Accumulator()
+                for index in indices {
+                    try autoreleasepool {
+                        evidence.observe(try horizontalMotionObservation(samples[index].url,
+                            registration: gridByIndex[index] ?? identityMatchingByIndex[index]))
+                    }
+                }
+                let layout = evidence.resolve()
+#if LONGSHOT_CAPTURE_CHECKS
+                Self.alignmentTrace?("motion layers frozenLeft=\(layout.frozenLeadingPixels) observations=\(layout.observations)")
+#endif
+                for index in indices { motionByIndex[index] = layout }
+            }
+        }
+
         var pieces: [Piece] = []
+        var horizontalPlans: [Int: HorizontalSegmentPlan] = [:]
         var usedFrames = Set<Int>()
         var alignmentFrames: [Int: GrayFrame] = [:]
         var alignmentOrder: [Int] = []
@@ -423,6 +502,14 @@ final class FrameStitcher {
         }
         let selected = ProcessInfo.processInfo.systemUptime
 
+        func movingFrame(_ frame: GrayFrame, at index: Int) -> GrayFrame {
+            let left = motionByIndex[index]?.frozenLeadingPixels ?? 0
+            guard left > 0 else { return frame }
+            let first = Int(floor(Double(left) * Double(frame.height) / Double(height)))
+            return GrayFrame(width: frame.width, height: frame.height - first,
+                             pixels: Array(frame.pixels[(first * frame.width)...]))
+        }
+
         func alignmentFrame(at index: Int) throws -> GrayFrame {
             if let cached = alignmentFrames[index] { return cached }
             var frame: GrayFrame
@@ -435,6 +522,7 @@ final class FrameStitcher {
             // Adjacent matching only needs a few recent fine-grained frames.
             // Revisited viewports use coarse samples; eviction changes no pixels.
             if alignmentOrder.count >= 8 { alignmentFrames.removeValue(forKey: alignmentOrder.removeFirst()) }
+            frame = movingFrame(frame, at: index)
             alignmentFrames[index] = frame
             alignmentOrder.append(index)
             return frame
@@ -442,11 +530,12 @@ final class FrameStitcher {
 
         func tableLayers(at index: Int) throws -> HorizontalTableLayers {
             if let cached = tableLayerFrames[index] { return cached }
-            guard let registration = gridByIndex[index],
+            guard let registration = gridByIndex[index] ?? identityMatchingByIndex[index],
                   let headerTop = tableHeaderTopByIndex[index] else { throw StitchError.unseenGap }
             let layers = try autoreleasepool {
                 try makeHorizontalTableLayers(from: samples[index].url, headerTop: headerTop,
-                    registration: registration, masks: gridMasksByIndex[index] ?? [])
+                    registration: registration, masks: gridMasksByIndex[index] ?? [],
+                    frozenLeadingPixels: motionByIndex[index]?.frozenLeadingPixels ?? 0)
             }
             // Bounded analysis memory even for a long, multi-page recording.
             if tableLayerOrder.count >= 2 {
@@ -458,13 +547,14 @@ final class FrameStitcher {
         }
 
         var horizontalDisplacements: [Int: ShiftEstimate] = [:]
+        var horizontalCandidates: [Int: [ShiftEstimate]] = [:]
         if options.axis == .horizontal {
             for range in ranges {
                 let indices = range.filter { !samples[$0].isSystemPanel }
                 guard indices.count > 1 else { continue }
                 // A registered table has separately moving headings and body.
                 // It must not be reduced to one transposed 1-D motion path.
-                if indices.allSatisfy({ gridByIndex[$0] != nil }) { continue }
+                if indices.allSatisfy({ gridByIndex[$0] != nil || identityMatchingByIndex[$0] != nil }) { continue }
                 var candidates: [[ShiftEstimate]] = []
                 for local in 1..<indices.count {
                     let previous = indices[local - 1], current = indices[local]
@@ -472,13 +562,14 @@ final class FrameStitcher {
                         candidates.append([ShiftEstimate(rows: 0, score: 0, confidence: 1)])
                     } else {
                         candidates.append(HorizontalScrollMatcher.candidates(
-                            samples[previous].gray, samples[current].gray
+                            movingFrame(samples[previous].gray, at: previous), movingFrame(samples[current].gray, at: current)
                         ))
                     }
                 }
                 let selected = HorizontalScrollMatcher.selectSequence(candidates)
                 for (local, estimate) in selected.enumerated() {
                     if let estimate { horizontalDisplacements[indices[local + 1]] = estimate }
+                    horizontalCandidates[indices[local + 1]] = candidates[local]
                 }
             }
         }
@@ -536,7 +627,7 @@ final class FrameStitcher {
                 for local in 1..<indices.count {
                     let current = indices[local]
                     let previous = indices[local - 1]
-                    if let registration = gridByIndex[current] {
+                    if let registration = gridByIndex[current] ?? identityMatchingByIndex[current] {
                         let a = try tableLayers(at: previous), b = try tableLayers(at: current)
                         let crossShift = (registration.shifts[samples[current].url] ?? 0)
                             - (registration.shifts[samples[previous].url] ?? 0)
@@ -550,7 +641,8 @@ final class FrameStitcher {
                         }
                         let estimate = HorizontalTableMatcher.estimate(
                             headerA: a.header, headerB: b.header, bodyA: a.body, bodyB: b.body,
-                            expectedCrossShift: crossShift
+                            expectedCrossShift: crossShift,
+                            isolatedMovingBody: (motionByIndex[current]?.frozenLeadingPixels ?? 0) > 0
                         )
                         guard let estimate, abs(estimate.dy - crossShift) <= 1 else {
 #if LONGSHOT_CAPTURE_CHECKS
@@ -578,14 +670,25 @@ final class FrameStitcher {
                     }
                     let previousAlignment = try alignmentFrame(at: previous)
                     let currentAlignment = try alignmentFrame(at: current)
-                    let scale = CGFloat(previousAlignment.height) / CGFloat(samples[previous].gray.height)
-                    let refined = HorizontalScrollMatcher.refine(
-                        from: previousAlignment, to: currentAlignment,
-                        around: Int(round(CGFloat(coarse.rows) * scale)),
-                        searchRadius: max(10, Int(ceil(scale * 2.5))),
-                        smoothingRadius: Int(floor(scale / 2))
-                    )
-                    guard let refined else { throw StitchError.unseenGap }
+                    let scale = CGFloat(previousAlignment.height) / CGFloat(movingFrame(samples[previous].gray, at: previous).height)
+                    // Coarse sampling can alias repeated cells. Verify separate
+                    // candidate peaks at native X; direction/sequence priors
+                    // may propose an offset, never overrule pixel evidence.
+                    var peaks = [coarse]
+                    for candidate in horizontalCandidates[current] ?? [] where candidate.rows != 0 {
+                        if peaks.allSatisfy({ abs($0.rows - candidate.rows) > max(4, Int(12 / scale)) }) {
+                            peaks.append(candidate)
+                            if peaks.count == 4 { break }
+                        }
+                    }
+                    let verified = peaks.compactMap { candidate in
+                        HorizontalScrollMatcher.refine(from: previousAlignment, to: currentAlignment,
+                            around: Int(round(CGFloat(candidate.rows) * scale)),
+                            searchRadius: max(10, Int(ceil(scale * 2.5))), smoothingRadius: Int(floor(scale / 2)))
+                    }.sorted { $0.score < $1.score }
+                    guard let refined = verified.first, refined.score < 6 else { throw StitchError.unseenGap }
+                    if let rival = verified.dropFirst().first(where: { abs($0.rows - refined.rows) > 2 }),
+                       rival.score - refined.score < 0.15 { throw StitchError.unseenGap }
                     let offset = positioned.last!.offset + refined.rows
                     positioned.append(PositionedFrame(index: current, offset: offset))
                 }
@@ -654,10 +757,34 @@ final class FrameStitcher {
                 if ranges.count > 1 { throw StitchError.unusablePage(pageIndex + 1) }
                 continue
             }
+            if options.axis == .horizontal {
+                // A revisited original viewport is an exact loop closure, not
+                // permission to accumulate another copy of its columns.
+                var known: [URL: Int] = [:]
+                for frame in positioned {
+                    let url = samples[frame.index].url
+                    if let prior = known[url], prior != frame.offset { throw StitchError.unseenGap }
+                    known[url] = frame.offset
+                }
+                let origin = positioned.map(\.offset).min() ?? 0
+                var seen = Set<URL>()
+                let frames = positioned.compactMap { frame -> (url: URL, offset: CGFloat)? in
+                    let url = samples[frame.index].url
+                    return seen.insert(url).inserted ? (url, CGFloat(frame.offset - origin)) : nil
+                }
+                horizontalPlans[pageIndex] = HorizontalSegmentPlan(frames: frames,
+                    frozenLeadingPixels: motionByIndex[indices[0]]?.frozenLeadingPixels ?? 0,
+                    grid: gridByIndex[indices[0]])
+            }
             let segment = try makeSegmentPieces(
-                positioned: positioned, samples: samples, contentTop: contentTop,
+                positioned: positioned, samples: samples,
+                contentTop: options.axis == .horizontal ? CGFloat(motionByIndex[indices[0]]?.frozenLeadingPixels ?? 0) : contentTop,
                 contentBottom: contentBottom, outputTop: outputTop, width: width, height: height
-            )
+            ).map { piece -> Piece in
+                var result = piece
+                if options.axis == .horizontal { result.segmentID = pageIndex }
+                return result
+            }
 #if LONGSHOT_CAPTURE_CHECKS
             let locations = positioned.map { "\($0.index):\($0.offset)" }.joined(separator: ",")
             Self.alignmentTrace?("positions=\(locations)")
@@ -681,14 +808,16 @@ final class FrameStitcher {
         try removeOldOutputs(from: outputDirectory)
 
         var outputURLs: [URL] = []
+        var omittedOccludedBottomRows = false
         let assembled = ProcessInfo.processInfo.systemUptime
         for (index, page) in pages.enumerated() {
             let outputURL = outputDirectory.appendingPathComponent(
                 String(format: "longshot-%02d.jpg", index + 1)
             )
             if options.axis == .horizontal {
-                try renderHorizontal(page: page, originalHeight: width, topCropRatio: topCropRatio,
-                                     gridRegistrations: gridByURL, to: outputURL)
+                let omitted = try renderHorizontal(page: page, originalHeight: width, topCropRatio: topCropRatio,
+                                                  plans: horizontalPlans, to: outputURL)
+                omittedOccludedBottomRows = omittedOccludedBottomRows || omitted
             } else {
                 try render(page: page, width: width, to: outputURL)
             }
@@ -707,7 +836,8 @@ final class FrameStitcher {
                 total: ProcessInfo.processInfo.systemUptime - started
             ),
             preparedFrameCount: preparedFrameCount,
-            preparedAlignmentCount: preparedAlignmentCount
+            preparedAlignmentCount: preparedAlignmentCount,
+            omittedOccludedBottomRows: omittedOccludedBottomRows
         )
     }
 
@@ -734,15 +864,43 @@ final class FrameStitcher {
         )
     }
 
+    private func horizontalMotionObservation(_ url: URL, registration: HorizontalGridRegistration?) throws -> GrayFrame {
+        guard let source = UIImage(contentsOfFile: url.path)?.cgImage else { throw StitchError.unreadableFrame(url) }
+        let width = source.width, headerRows = registration == nil ? 0 : 32, bodyRows = 128
+        let rows = headerRows + bodyRows
+        var pixels = [UInt8](repeating: 0, count: width * rows)
+        func band(_ rect: CGRect, destination: Int, count: Int) throws {
+            guard let cropped = source.cropping(to: rect) else { throw StitchError.inconsistentFrameSize }
+            let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
+                guard let base = bytes.baseAddress,
+                      let context = CGContext(data: base.advanced(by: destination * width), width: width, height: count,
+                        bitsPerComponent: 8, bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return false }
+                context.interpolationQuality = .medium
+                context.draw(cropped, in: CGRect(x: 0, y: 0, width: width, height: count)); return true
+            }
+            if !rendered { throw StitchError.couldNotEncode }
+        }
+        if let registration {
+            try band(CGRect(x: 0, y: registration.headerTop + 2, width: width,
+                            height: registration.top - registration.headerTop - 5), destination: 0, count: headerRows)
+            // Frozen columns follow the table body's small Y movement. Compare
+            // them in common body coordinates, not against the static toolbar.
+            let shift = registration.shifts[url] ?? 0
+            try band(CGRect(x: 0, y: registration.commonTop + shift, width: width,
+                            height: registration.commonBottom - registration.commonTop), destination: headerRows, count: bodyRows)
+        } else {
+            try band(CGRect(x: 0, y: source.height / 4, width: width, height: source.height / 2),
+                     destination: 0, count: bodyRows)
+        }
+        return GrayFrame(width: width, height: rows, pixels: pixels)
+    }
+
     private func makeHorizontalTableLayers(from url: URL, headerTop: Int,
-        registration: HorizontalGridRegistration, masks: [CGRect]) throws -> HorizontalTableLayers {
+        registration: HorizontalGridRegistration, masks: [CGRect], frozenLeadingPixels: Int) throws -> HorizontalTableLayers {
         guard let original = UIImage(contentsOfFile: url.path)?.cgImage else {
             throw StitchError.unreadableFrame(url)
         }
-        // The frozen row-number rail is not evidence of horizontal scrolling.
-        // Excluding a margin is analysis-only; the rendered first column and
-        // the rail retain all their original pixels.
-        let left = max(1, original.width / 10)
+        let left = frozenLeadingPixels
         let nativeWidth = original.width - left
         // Use the first moving label band, not all the coloured/repeating
         // fields below it. Those fields can swamp the sparse column identity
@@ -754,7 +912,7 @@ final class FrameStitcher {
         for mask in masks where mask.minY > CGFloat(bodyTop + (registration.bottom - bodyTop) / 2) {
             bodyBottom = min(bodyBottom, Int(floor(mask.minY)) - 4)
         }
-        guard headerBottom - headerTop >= 12, bodyBottom - bodyTop >= 80, nativeWidth >= 160 else {
+        guard headerBottom - headerTop >= 12, bodyBottom - bodyTop >= 80, nativeWidth >= 64 else {
             throw StitchError.unseenGap
         }
         func gray(top: Int, bottom: Int) throws -> GrayFrame {
@@ -975,7 +1133,7 @@ final class FrameStitcher {
                         y: remaining.minY,
                         width: remaining.width,
                         height: sliceHeight
-                    )
+                    ), segmentID: piece.segmentID
                 )
                 pages[pages.count - 1].append(slice)
                 currentHeight += sliceHeight
@@ -1039,7 +1197,7 @@ final class FrameStitcher {
     }
 
     private func renderHorizontal(page: [Piece], originalHeight: CGFloat, topCropRatio: Double,
-        gridRegistrations: [URL: HorizontalGridRegistration] = [:], to outputURL: URL) throws {
+        plans: [Int: HorizontalSegmentPlan] = [:], bottomCuts: [Int: CGFloat] = [:], to outputURL: URL) throws -> Bool {
         let width = page.reduce(CGFloat(0)) { $0 + $1.sourceRect.height }
         let statusHeight = min(floor(originalHeight * 0.075), ceil(originalHeight * max(0, topCropRatio)))
         let headerHeight = options.keepsStatusBar ? statusHeight : 0
@@ -1056,7 +1214,7 @@ final class FrameStitcher {
             groups[groups.count - 1].append(piece)
         }
         let registrations = groups.map { group in
-            group.compactMap(\.frameURL).first.flatMap { gridRegistrations[$0] }
+            group.first?.segmentID.flatMap { plans[$0]?.grid }
         }
         let insets = groups.enumerated().map { index, group in
             if let registration = registrations[index] {
@@ -1064,17 +1222,27 @@ final class FrameStitcher {
             }
             return fixedHorizontalInsets(group, height: Int(originalHeight), statusHeight: Int(statusHeight))
         }
-        let crop = registrations.map { CGFloat($0?.crop ?? 0) }.min() ?? 0
+        let omissions = groups.indices.map { index -> CGFloat in
+            guard let cutoff = bottomCuts[index] else { return 0 }
+            // cutoff is already in the registered output coordinates. The
+            // shared-body crop must not be subtracted a second time.
+            return max(0, originalHeight - CGFloat(insets[index].bottom)
+                - CGFloat(registrations[index]?.crop ?? 0) - cutoff)
+        }
+        let crop = groups.indices.map { CGFloat(registrations[$0]?.crop ?? 0) + omissions[$0] }.min() ?? 0
         let height = originalHeight - statusHeight + headerHeight - crop
         var unreadable: URL?
         var repairError: Error?
-        let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { context in
+        var fallbackCuts = bottomCuts
+        var image: UIImage? = autoreleasepool {
+          UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { context in
             UIColor.white.setFill()
             context.fill(CGRect(x: 0, y: 0, width: width, height: height))
             var destinationX: CGFloat = 0
             for (groupIndex, group) in groups.enumerated() {
                 let startX = destinationX
-                let top = CGFloat(insets[groupIndex].top), bottom = CGFloat(insets[groupIndex].bottom)
+                let top = CGFloat(insets[groupIndex].top), originalBottom = CGFloat(insets[groupIndex].bottom)
+                let omission = omissions[groupIndex], bottom = originalBottom + omission
                 let registration = registrations[groupIndex]
                 let groupCrop = CGFloat(registration?.crop ?? 0)
 #if LONGSHOT_CAPTURE_CHECKS
@@ -1102,7 +1270,7 @@ final class FrameStitcher {
                         }
                         if let registration {
                             drawBand(top: top, height: CGFloat(registration.top) - top)
-                            drawBand(top: CGFloat(registration.top), height: CGFloat(registration.commonBottom - registration.commonTop),
+                            drawBand(top: CGFloat(registration.top), height: CGFloat(registration.commonBottom - registration.commonTop) - omission,
                                      translation: registration.translation(for: frameURL))
                         } else {
                             drawBand(top: top, height: originalHeight - top - bottom)
@@ -1113,7 +1281,20 @@ final class FrameStitcher {
                 do {
                     try repairFixedHorizontalOverlays(group, context: context.cgContext, startX: startX,
                         yOffset: headerHeight - statusHeight, top: top, bottom: bottom, originalHeight: originalHeight,
-                        registration: registration)
+                        registration: registration,
+                        frozenLeadingPixels: group.first?.segmentID.flatMap { plans[$0]?.frozenLeadingPixels } ?? 0,
+                        plan: group.first?.segmentID.flatMap { plans[$0] })
+                } catch let gap as HorizontalOverlayGap {
+                    let urls = group.first?.segmentID.flatMap { plans[$0]?.frames.map(\.url) }
+                        ?? group.compactMap(\.frameURL)
+                    if bottomCuts[groupIndex] == nil,
+                       let cutoff = completeHorizontalRowEnd(urls, above: gap.top,
+                            contentTop: top, registration: registration) {
+                        fallbackCuts[groupIndex] = cutoff
+#if LONGSHOT_CAPTURE_CHECKS
+                        Self.alignmentTrace?("overlay fallback complete rows end=\(cutoff) previousEnd=\(originalHeight - originalBottom)")
+#endif
+                    } else { repairError = StitchError.unseenGap }
                 } catch { repairError = error }
                 if let url = group.first?.frameURL, let source = UIImage(contentsOfFile: url.path) {
                     context.cgContext.saveGState()
@@ -1121,11 +1302,11 @@ final class FrameStitcher {
                     context.cgContext.clip(to: CGRect(x: startX, y: headerHeight, width: chromeWidth, height: top - statusHeight))
                     source.draw(at: CGPoint(x: startX, y: headerHeight - statusHeight))
                     context.cgContext.restoreGState()
-                    let footerTop = registration.map { CGFloat($0.bottom) } ?? (originalHeight - bottom)
+                    let footerTop = registration.map { CGFloat($0.bottom) } ?? (originalHeight - originalBottom)
                     context.cgContext.saveGState()
-                    context.cgContext.clip(to: CGRect(x: startX, y: headerHeight - statusHeight + footerTop - groupCrop,
+                    context.cgContext.clip(to: CGRect(x: startX, y: headerHeight - statusHeight + footerTop - groupCrop - omission,
                         width: chromeWidth, height: originalHeight - footerTop))
-                    source.draw(at: CGPoint(x: startX, y: headerHeight - statusHeight - groupCrop))
+                    source.draw(at: CGPoint(x: startX, y: headerHeight - statusHeight - groupCrop - omission))
                     context.cgContext.restoreGState()
                 }
             }
@@ -1139,15 +1320,72 @@ final class FrameStitcher {
                 context.cgContext.restoreGState()
             }
         }
+        }
         if let repairError { throw repairError }
         if let unreadable { throw StitchError.unreadableFrame(unreadable) }
-        guard let data = image.jpegData(compressionQuality: 0.94) else { throw StitchError.couldNotEncode }
+        if fallbackCuts != bottomCuts {
+            // Release the full-size first canvas before allocating the retry.
+            image = nil
+            // Retry only an unsupported bottom overlay, never an unmatched
+            // column or internal table gap. Each affected segment retries once.
+            return try renderHorizontal(page: page, originalHeight: originalHeight, topCropRatio: topCropRatio,
+                plans: plans, bottomCuts: fallbackCuts, to: outputURL)
+        }
+        guard let data = image?.jpegData(compressionQuality: 0.94) else { throw StitchError.couldNotEncode }
         try data.write(to: outputURL, options: .atomic)
+        return !bottomCuts.isEmpty
+    }
+
+    /// Find a real row divider above the occlusion in independently observed
+    /// viewports. This is not a fixed-percent crop: if a complete row boundary
+    /// cannot be established, retain the original failure instead of cutting
+    /// through text. Never apply this fallback to central/non-bottom overlays.
+    private func completeHorizontalRowEnd(_ urls: [URL], above limit: CGFloat,
+        contentTop: CGFloat, registration: HorizontalGridRegistration?) -> CGFloat? {
+        guard let first = urls.first, let image = UIImage(contentsOfFile: first.path)?.cgImage,
+              limit > CGFloat(image.height) * 0.65 else { return nil }
+        let width = 192, height = image.height
+        var chosen: [URL] = []
+        for url in [first, urls[urls.count / 2], urls[urls.count - 1]] where !chosen.contains(url) { chosen.append(url) }
+        guard chosen.count >= 2 else { return nil }
+        let profiles: [[UInt8]] = chosen.compactMap { url in
+            autoreleasepool {
+                guard let source = UIImage(contentsOfFile: url.path)?.cgImage else { return nil }
+                var pixels = [UInt8](repeating: 0, count: width * height)
+                let ok = pixels.withUnsafeMutableBytes { memory -> Bool in
+                    guard let c = CGContext(data: memory.baseAddress, width: width, height: height,
+                        bitsPerComponent: 8, bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return false }
+                    c.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height)); return true
+                }
+                return ok ? pixels : nil
+            }
+        }
+        guard profiles.count == chosen.count else { return nil }
+        let minimumTranslation = chosen.map { registration?.translation(for: $0) ?? 0 }.min() ?? 0
+        let upper = min(height - 4, Int(floor(limit + minimumTranslation)) - 4)
+        let lower = max(Int(contentTop) + 40, upper - height / 5)
+        guard upper > lower else { return nil }
+        for y in stride(from: upper, through: lower, by: -1) {
+            let supported = zip(chosen, profiles).allSatisfy { url, p in
+                let sourceY = y - Int(registration?.translation(for: url) ?? 0)
+                guard sourceY > 3, sourceY < height - 4 else { return false }
+                var votes = 0
+                for x in 8..<(width - 5) {
+                    let ink = Int(p[sourceY * width + x])
+                    let surround = min(Int(p[(sourceY - 3) * width + x]), Int(p[(sourceY + 3) * width + x]))
+                    if ink < 232 && surround - ink >= 12 { votes += 1 }
+                }
+                return votes * 5 >= (width - 13) * 3
+            }
+            if supported { return CGFloat(y + 1) }
+        }
+        return nil
     }
 
     private func repairFixedHorizontalOverlays(_ pieces: [Piece], context: CGContext, startX: CGFloat,
         yOffset: CGFloat, top: CGFloat, bottom: CGFloat, originalHeight: CGFloat,
-        registration: HorizontalGridRegistration? = nil) throws {
+        registration: HorizontalGridRegistration? = nil, frozenLeadingPixels: Int = 0,
+        plan: HorizontalSegmentPlan? = nil) throws {
         var frames: [(url: URL, offset: CGFloat)] = [], cursor: CGFloat = 0
         for piece in pieces {
             if let url = piece.frameURL, !frames.contains(where: { $0.url == url }) {
@@ -1155,10 +1393,32 @@ final class FrameStitcher {
             }
             cursor += piece.sourceRect.height
         }
+        if let plan, let first = pieces.first, let url = first.frameURL,
+           let anchor = plan.frames.first(where: { $0.url == url }) {
+            let origin = anchor.offset + first.sourceRect.minY
+            // All registered observations may recover a covered cell, including
+            // frames which added no new output extent. Pagination merely clips
+            // this common coordinate system; it must not reset its origin.
+            frames = plan.frames.map { ($0.url, $0.offset - origin) }
+        }
         guard frames.count > 1 else { return }
+        // A coloured selection/badge inside the frozen pane is table content,
+        // not a moving-region occlusion. It already appears once in that pane.
         let overlays = fixedHorizontalColorOverlays(frames.map(\.url), top: top, bottom: bottom, height: originalHeight)
+            .filter { $0.maxX > CGFloat(frozenLeadingPixels) }
+#if LONGSHOT_CAPTURE_CHECKS
+        Self.alignmentTrace?("overlay masks=\(overlays) body=\(top)..<\(originalHeight - bottom)")
+#endif
         guard !overlays.isEmpty else { return }
         let masks = frames.map { frame in overlays.map { $0.offsetBy(dx: 0, dy: registration?.translation(for: frame.url) ?? 0) } }
+        let first = frames.indices.min(by: { frames[$0].offset < frames[$1].offset })!
+        let last = frames.indices.max(by: { frames[$0].offset < frames[$1].offset })!
+        // A control crossing the frozen boundary covers pixels that can never
+        // be exposed by horizontal scrolling. Keep that entire control once at
+        // the frozen edge; controls wholly in the moving layer stay at the end.
+        let retained = overlays.indices.map { index in
+            (frame: overlays[index].minX < CGFloat(frozenLeadingPixels) ? first : last, mask: index)
+        }
         let boundaries = Array(Set(masks.flatMap { $0.flatMap { [$0.minY, $0.maxY] } })).sorted()
         context.saveGState()
         defer { context.restoreGState() }
@@ -1174,8 +1434,10 @@ final class FrameStitcher {
             var spans: [(start: CGFloat, end: CGFloat, frame: Int)] = []
             for (index, frame) in frames.enumerated() {
                 let size = sizes[index]
-                var visible = [CGRect(x: frame.offset == 0 ? 0 : floor(size.width * topInsetRatio), y: low,
-                                      width: size.width - (frame.offset == 0 ? 0 : floor(size.width * topInsetRatio)), height: high - low)]
+                let hasFrozenLayer = plan.map { plan in plan.frames.contains { $0.url == frame.url && $0.offset == 0 } }
+                    ?? (frame.offset == 0)
+                let left = hasFrozenLayer ? 0 : CGFloat(frozenLeadingPixels)
+                var visible = [CGRect(x: left, y: low, width: size.width - left, height: high - low)]
                 for mask in masks[index].filter({ $0.minY < high && $0.maxY > low }) {
                     visible = visible.flatMap { rect -> [CGRect] in
                         guard rect.intersects(mask) else { return [rect] }
@@ -1190,15 +1452,39 @@ final class FrameStitcher {
                 }
             }
             spans.sort { $0.start != $1.start ? $0.start < $1.start : $0.end > $1.end }
+            // Coverage certificate: every output pixel in an occluded band
+            // must be observed elsewhere, or belong to the single authentic
+            // final control retained below. Never leave repeated fragments in
+            // an interior hole and report the result as a complete table.
+            var supported = spans.map { ($0.start, $0.end) }
+            for anchor in retained {
+                let mask = masks[anchor.frame][anchor.mask]
+                if mask.minY < high && mask.maxY > low {
+                    supported.append((frames[anchor.frame].offset + mask.minX, frames[anchor.frame].offset + mask.maxX))
+                }
+            }
+            supported.sort { $0.0 < $1.0 }
+            var verified: CGFloat = 0
+            for interval in supported where interval.1 > verified && interval.0 < cursor {
+                guard interval.0 <= verified else {
+#if LONGSHOT_CAPTURE_CHECKS
+                    Self.alignmentTrace?("overlay unseen band=\(low)..<\(high) x=\(verified)..<\(interval.0) frozen=\(frozenLeadingPixels)")
+#endif
+                    throw HorizontalOverlayGap(top: overlays.map(\.minY).min() ?? low)
+                }
+                verified = min(cursor, interval.1)
+            }
+            guard verified >= cursor else { throw HorizontalOverlayGap(top: overlays.map(\.minY).min() ?? low) }
             var covered: CGFloat = 0
             for span in spans {
                 guard span.end > covered else { continue }
                 // Restore only actual overlapping pixels. A permanently hidden
                 // region remains the original overlay rather than fake content.
-                let begin = max(span.start, covered)
+                let begin = max(0, max(span.start, covered)), end = min(cursor, span.end)
+                guard end > begin else { continue }
                 drawPlans[span.frame, default: []].append(CGRect(x: startX + begin, y: yOffset + low,
-                    width: span.end - begin, height: high - low))
-                covered = span.end
+                    width: end - begin, height: high - low))
+                covered = end
             }
         }
         // Decode a source once for all of its disjoint repair strips, instead
@@ -1218,12 +1504,14 @@ final class FrameStitcher {
         // The final edge may never have been visible behind its floating
         // control. Preserve that authentic control whole once, rather than
         // half-erasing it into alternating blue and white fragments.
-        if let index = frames.indices.max(by: { frames[$0].offset < frames[$1].offset }) {
+        for index in Set(retained.map(\.frame)).sorted() {
             let frame = frames[index]
             try autoreleasepool {
                 guard let image = UIImage(contentsOfFile: frame.url.path) else { throw StitchError.unreadableFrame(frame.url) }
                 context.saveGState()
-                context.clip(to: masks[index].map { $0.offsetBy(dx: startX + frame.offset, dy: yOffset) })
+                context.clip(to: retained.filter { $0.frame == index }.map {
+                    masks[index][$0.mask].offsetBy(dx: startX + frame.offset, dy: yOffset)
+                })
                 image.draw(at: CGPoint(x: startX + frame.offset,
                     y: yOffset + (registration?.translation(for: frame.url) ?? 0)))
                 context.restoreGState()

@@ -20,6 +20,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var outputURLs: [URL] = []
     @Published private(set) var previewImage: UIImage?
+    @Published private(set) var omittedOccludedBottomRows = false
     @Published private(set) var lastCaptureDate: Date?
     @Published private(set) var isSavedPreviewRequested = false
     @Published private(set) var isSavedThumbnailPresented = false
@@ -166,6 +167,7 @@ final class AppModel: ObservableObject {
         isSavedPreviewRequested = false
         outputURLs = []
         previewImage = nil
+        omittedOccludedBottomRows = false
         processingSessionID = nil
         finishRequest = nil
         isPageTransitionPaused = false
@@ -436,11 +438,15 @@ final class AppModel: ObservableObject {
                 "outputCount": result.outputURLs.count
             ]) { _, new in new })
 
+            // Persist the qualification before Photos commits, including recovery
+            // after a process interruption between Photos and final metadata.
+            var updatedManifest = manifest
+            updatedManifest.omittedOccludedBottomRows = result.omittedOccludedBottomRows
+            try CaptureStorage.write(updatedManifest, to: sessionURL)
             let photosTiming = try await saveToPhotos(result.outputURLs, sessionID: manifest.id)
             timing.merge(photosTiming) { _, new in new }
             let persistenceStartedAt = Date()
             try CaptureStorage.markOutputsSavedToPhotos(in: sessionURL)
-            var updatedManifest = manifest
             updatedManifest.state = .complete
             updatedManifest.failureMessage = nil
             updatedManifest.acceptedFrameCount = result.acceptedFrameCount
@@ -463,7 +469,7 @@ final class AppModel: ObservableObject {
             CaptureProcessingDiagnostics.record("processingFailed", sessionID: manifest.id, values: [
                 "errorDomain": diagnosticError.domain, "errorCode": diagnosticError.code
             ])
-            var failedManifest = manifest
+            var failedManifest = (try? CaptureStorage.readManifest(at: sessionURL)) ?? manifest
             failedManifest.completedAt = Date()
             failedManifest.state = .failed
             failedManifest.failureMessage = error.localizedDescription
@@ -478,6 +484,7 @@ final class AppModel: ObservableObject {
         activeSessionURL = sessionURL
         lastCaptureDate = manifest.startedAt
         outputURLs = urls
+        omittedOccludedBottomRows = manifest.omittedOccludedBottomRows == true
         previewImage = urls.first.flatMap { UIImage(contentsOfFile: $0.path) }
         phase = .ready(
             pageCount: urls.count,
@@ -515,7 +522,8 @@ final class AppModel: ObservableObject {
             image: urls.first.flatMap { UIImage(contentsOfFile: $0.path) },
             sessionURL: sessionURL,
             sessionID: manifest.id,
-            pageCount: urls.count
+            pageCount: urls.count,
+            omittedOccludedBottomRows: manifest.omittedOccludedBottomRows == true
         )
         CaptureProcessingDiagnostics.record("resultNotificationFinished", sessionID: manifest.id)
         resultDeliverySessions.remove(manifest.id)
@@ -648,7 +656,8 @@ final class AppModel: ObservableObject {
         resultDeliverySessions.insert(sessionID)
         await resultNotificationManager.postSavedResult(
             image: UIImage(contentsOfFile: existing[0].path),
-            sessionURL: selected.url, sessionID: sessionID, pageCount: existing.count
+            sessionURL: selected.url, sessionID: sessionID, pageCount: existing.count,
+            omittedOccludedBottomRows: selected.manifest.omittedOccludedBottomRows == true
         )
         resultDeliverySessions.remove(sessionID)
         scheduleStorageMaintenance()

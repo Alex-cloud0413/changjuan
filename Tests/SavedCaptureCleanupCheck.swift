@@ -20,8 +20,9 @@ struct SavedCaptureCleanupCheck {
         try testSymlinksAndUnknownData()
         try testRepeatedCaptureBound()
         try testExplicitRawCleanup()
+        try testPartialResultRetention()
         CaptureStorage.testContainerURL = nil
-        print("Saved capture cleanup passed (10 scenarios, \(assertions) assertions). Synthetic fixtures: \(fixture.path)")
+        print("Saved capture cleanup passed (11 scenarios, \(assertions) assertions). Synthetic fixtures: \(fixture.path)")
     }
 
     static func useCase(_ name: String) throws {
@@ -220,6 +221,27 @@ struct SavedCaptureCleanupCheck {
         for (output, data) in zip(outputs, before) { check(try Data(contentsOf: output) == data, "Generated preview byte identical") }
         let again = SavedCaptureCleanup.clearAllRawCaches()
         check(again.reclaimedBytes == 0 && again.clearedRawSessionIDs.isEmpty, "Repeated manual clearing is idempotent")
+    }
+
+    static func testPartialResultRetention() throws {
+        try useCase("partial-retention")
+        let url = try session(age: 30 * 86400)
+        var manifest = try CaptureStorage.readManifest(at: url)
+        check(manifest.omittedOccludedBottomRows == nil, "Old manifest remains readable")
+        manifest.omittedOccludedBottomRows = true
+        try CaptureStorage.write(manifest, to: url)
+        check(try CaptureStorage.readManifest(at: url).omittedOccludedBottomRows == true, "Qualification survives restart")
+        let before = try snapshot(url)
+        let policy = SavedCaptureCleanup.Policy(maximumAge: 0, maximumCount: 0, maximumBytes: 0)
+        let cleanup = SavedCaptureCleanup.run(now: now, policy: policy)
+        check(cleanup.reclaimedBytes == 0 && cleanup.removedSessionIDs.isEmpty, "Partial result never triggers automatic source deletion")
+        check(try snapshot(url) == before, "Entire partial session remains byte identical")
+        let explicit = SavedCaptureCleanup.clearAllRawCaches()
+        check(explicit.clearedRawSessionIDs == [url.lastPathComponent], "Explicit cache clearing still releases partial recording")
+        check(try CaptureStorage.frameURLs(in: url).isEmpty, "Explicit action removes raw inputs")
+        check(!CaptureStorage.existingOutputs(in: url).isEmpty, "Explicit cache action retains preview")
+        let retired = SavedCaptureCleanup.run(now: now, policy: policy)
+        check(retired.removedSessionIDs == [url.lastPathComponent], "Ordinary preview retention resumes after explicit cache clearing")
     }
 
     static func marker(_ url: URL) -> URL { url.appendingPathComponent(CaptureConstants.savedToPhotosMarkerName) }

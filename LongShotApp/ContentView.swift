@@ -51,7 +51,7 @@ struct ContentView: View {
                 CaptureSettingsView(model: model)
             }
             .fullScreenCover(isPresented: fullPreviewBinding) {
-                LongImagePreview(urls: model.outputURLs)
+                LongImagePreview(urls: model.outputURLs, omittedOccludedBottomRows: model.omittedOccludedBottomRows)
             }
             .fullScreenCover(isPresented: $showingUsageGuide, onDismiss: completeUsageGuidePresentation) {
                 UsageGuideView(isFirstRun: usageGuideIsInitial) {
@@ -221,7 +221,7 @@ struct ContentView: View {
                         Text(language.text("已保存到照片"))
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(ScrollPalette.ink)
-                        Text(language.text("轻点预览长图"))
+                        Text(language.text(model.omittedOccludedBottomRows ? "底部遮挡行未收录，轻点查看" : "轻点预览长图"))
                             .font(.footnote)
                             .foregroundStyle(ScrollPalette.secondaryInk)
                     }
@@ -233,7 +233,8 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(PressScaleButtonStyle())
-            .accessibilityLabel(language.text("已保存到照片，轻点预览刚刚生成的长图"))
+            .accessibilityLabel(language.text(model.omittedOccludedBottomRows
+                ? "底部遮挡行未收录，轻点查看" : "已保存到照片，轻点预览刚刚生成的长图"))
 
             Button {
                 model.dismissSavedThumbnail()
@@ -531,6 +532,7 @@ struct PressScaleButtonStyle: ButtonStyle {
 
 private struct LongImagePreview: View {
     let urls: [URL]
+    let omittedOccludedBottomRows: Bool
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appLanguage) private var language
@@ -560,6 +562,19 @@ private struct LongImagePreview: View {
             }
             .navigationTitle(previewTitle)
             .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .top) {
+                if omittedOccludedBottomRows {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(language.text("底部遮挡行未收录"), systemImage: "exclamationmark.triangle")
+                            .font(.subheadline.weight(.semibold))
+                        Text(language.text("悬浮按钮遮住的底部内容无法完整恢复，已保留上方完整可见的行。原始画面保留至手动清理缓存。"))
+                            .font(.footnote)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(.regularMaterial)
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(language.text("完成")) { dismiss() }

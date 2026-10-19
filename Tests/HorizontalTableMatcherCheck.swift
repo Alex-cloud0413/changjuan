@@ -50,7 +50,71 @@ struct HorizontalTableMatcherCheck {
                                     pixels: [UInt8](repeating: 255, count: width * headerHeight))
         require(HorizontalTableMatcher.estimate(headerA: blankHeader, headerB: blankHeader,
             bodyA: a.body, bodyB: b.body, expectedCrossShift: 2) == nil,
-            "Grid/body similarity cannot manufacture unique column-label evidence")
+            "Repeated body cells without labels cannot establish unique motion")
+        // A column label can disappear behind a frozen pane before the next
+        // label enters view. Distinct body content may prove that overlap.
+        let uniqueA = makeViewport(x: 0, y: 0, uniqueBody: true)
+        for dx in [0, 1, 91, 252, 419, 450] {
+            for dy in [-2, 0, 2] {
+                let uniqueB = makeViewport(x: dx, y: dy, uniqueBody: true)
+                for reverse in [false, true] {
+                    let previous = reverse ? uniqueB : uniqueA, current = reverse ? uniqueA : uniqueB
+                    let result = HorizontalTableMatcher.estimate(headerA: blankHeader, headerB: blankHeader,
+                        bodyA: previous.body, bodyB: current.body, expectedCrossShift: reverse ? -dy : dy)
+                    require(result?.dx == (reverse ? -dx : dx) && result?.dy == (reverse ? -dy : dy),
+                        "Unlabeled unique body dx=\(dx) dy=\(dy) reverse=\(reverse): \(String(describing: result))")
+                }
+            }
+        }
+        let uniqueB = makeViewport(x: 252, y: 0, uniqueBody: true)
+        // Tiny clipped glyphs at a frozen-pane boundary are not contradictory
+        // visible labels. Full body verification is still mandatory.
+        var clippedA = blankHeader.pixels, clippedB = blankHeader.pixels
+        for y in 12..<24 {
+            clippedA[y * width + 252] = 65
+            clippedB[y * width] = 145
+            clippedB[y * width + 1] = 180
+        }
+        let edgeA = GrayFrame(width: width, height: headerHeight, pixels: clippedA)
+        let edgeB = GrayFrame(width: width, height: headerHeight, pixels: clippedB)
+        for reverse in [false, true] {
+            let result = HorizontalTableMatcher.estimate(headerA: reverse ? edgeB : edgeA,
+                headerB: reverse ? edgeA : edgeB, bodyA: reverse ? uniqueB.body : uniqueA.body,
+                bodyB: reverse ? uniqueA.body : uniqueB.body, expectedCrossShift: 0)
+            require(result?.dx == (reverse ? -252 : 252), "Clipped boundary glyph must not veto verified body overlap")
+        }
+        for dy in [-2, 0, 2] {
+            require(HorizontalTableMatcher.correlationParity(uniqueA.body, makeViewport(x: 159, y: dy, uniqueBody: true).body, dy: dy),
+                "Accelerate must match every scalar candidate, including negative X")
+            require(HorizontalTableMatcher.correlationParity(periodicA.body, periodicB.body, dy: dy),
+                "Accelerate must preserve periodic ambiguity scores")
+        }
+        for w in [81, 257, 567] {
+            let p = (0..<(w * 177)).map { UInt8(($0 * 131 + ($0 / w) * 17) % 256) }
+            let a = GrayFrame(width: w, height: 177, pixels: p)
+            let b = GrayFrame(width: w, height: 177, pixels: p.reversed())
+            require(HorizontalTableMatcher.correlationParity(a, b, dy: -2), "Odd-width all-candidate numerical parity")
+            let blank = GrayFrame(width: w, height: 177, pixels: [UInt8](repeating: 255, count: p.count))
+            require(HorizontalTableMatcher.correlationParity(blank, blank, dy: 0), "Blank evidence remains absent")
+        }
+        require(HorizontalTableMatcher.estimate(headerA: blankHeader, headerB: blankHeader,
+            bodyA: uniqueA.body, bodyB: uniqueB.body, expectedCrossShift: 12) == nil,
+            "Body fallback cannot override contradictory cross-axis evidence")
+        require(HorizontalTableMatcher.estimate(headerA: blankHeader, headerB: blankHeader,
+            bodyA: uniqueA.body, bodyB: uniqueB.body) == nil,
+            "Unlabeled fallback requires independently constrained cross-axis position")
+        require(HorizontalTableMatcher.estimate(headerA: blankHeader, headerB: blankHeader,
+            bodyA: uniqueA.body, bodyB: makeViewport(x: width + 120, y: 0, uniqueBody: true).body,
+            expectedCrossShift: 0) == nil, "Distinct body content without captured overlap must fail")
+        require(HorizontalTableMatcher.estimate(headerA: uniqueA.header, headerB: uniqueA.header,
+            bodyA: uniqueA.body, bodyB: uniqueB.body, expectedCrossShift: 0) == nil,
+            "Body evidence must not overrule contradictory visible column labels")
+        var narrowA = uniqueA.body.pixels, narrowB = uniqueB.body.pixels
+        for index in (width * bodyHeight / 4)..<narrowA.count { narrowA[index] = 250; narrowB[index] = 250 }
+        require(HorizontalTableMatcher.estimate(headerA: blankHeader, headerB: blankHeader,
+            bodyA: GrayFrame(width: width, height: bodyHeight, pixels: narrowA),
+            bodyB: GrayFrame(width: width, height: bodyHeight, pixels: narrowB), expectedCrossShift: 0) == nil,
+            "One localized unique patch cannot establish session-wide table motion")
         let incompatibleHeader = GrayFrame(width: width - 1, height: headerHeight,
                                           pixels: [UInt8](repeating: 255, count: (width - 1) * headerHeight))
         require(HorizontalTableMatcher.estimate(headerA: a.header, headerB: incompatibleHeader,
@@ -80,7 +144,7 @@ struct HorizontalTableMatcherCheck {
             bodyA: a.body, bodyB: b.body, expectedCrossShift: hint)
     }
 
-    private static func makeViewport(x: Int, y: Int, uniqueHeader: Bool = true) -> Viewport {
+    private static func makeViewport(x: Int, y: Int, uniqueHeader: Bool = true, uniqueBody: Bool = false) -> Viewport {
         var header = [UInt8](repeating: 250, count: width * headerHeight)
         var body = [UInt8](repeating: 250, count: width * bodyHeight)
         for localX in 0..<width {
@@ -106,11 +170,11 @@ struct HorizontalTableMatcherCheck {
                 let row = worldY / rowHeight, inRow = worldY % rowHeight
                 let value: UInt8
                 if inColumn == 0 || inRow == 0 { value = 205 }
-                else if column % 3 != 0 && inColumn >= 18 && inColumn < 48 && inRow >= 9 && inRow < 23 {
+                else if (uniqueBody || column % 3 != 0) && inColumn >= 18 && inColumn < 48 && inRow >= 9 && inRow < 23 {
                     // Body cell contents repeat across columns, with completely
                     // blank intervening columns. Header identity must resolve X.
                     let gx = ((inColumn - 18) % 15) / 3, gy = (inRow - 9) / 2
-                    value = mark(identity: row % 5 + 17, x: gx, y: gy) ? 60 : 250
+                    value = mark(identity: uniqueBody ? column * 151 + row * 7 + 17 : row % 5 + 17, x: gx, y: gy) ? 60 : 250
                 } else { value = 250 }
                 body[localY * width + localX] = value
             }

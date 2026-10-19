@@ -294,6 +294,10 @@ enum SavedCaptureCleanup {
                           try isRegularFile(url.appendingPathComponent(CaptureConstants.manifestFileName)),
                           let manifest = try? CaptureStorage.readManifest(at: url),
                           manifest.id == url.lastPathComponent, manifest.state == .complete else { continue }
+                    // An occluded partial output is not a complete backup. Keep
+                    // the entire source until the user's explicit cache clearing.
+                    guard manifest.omittedOccludedBottomRows != true
+                        || CaptureStorage.hasDiscardedRawFrames(in: url) else { continue }
                     let marker = url.appendingPathComponent(CaptureConstants.savedToPhotosMarkerName)
                     guard try isRegularFile(marker) else { continue }
                     // Validate the whole tree before any mutation. Do not follow
@@ -331,7 +335,9 @@ enum SavedCaptureCleanup {
                 do {
                     // Recheck eligibility immediately before retiring. Never infer
                     // a successful Photos save from manifest.savedToPhotos alone.
-                    guard try CaptureStorage.readManifest(at: item.url).state == .complete,
+                    let current = try CaptureStorage.readManifest(at: item.url)
+                    guard current.state == .complete,
+                          current.omittedOccludedBottomRows != true || CaptureStorage.hasDiscardedRawFrames(in: item.url),
                           try isRegularFile(item.url.appendingPathComponent(CaptureConstants.savedToPhotosMarkerName)) else { continue }
                     if !files.fileExists(atPath: trash.path) {
                         try files.createDirectory(at: trash, withIntermediateDirectories: false)

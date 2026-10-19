@@ -74,4 +74,6 @@ struct CaptureManifest: Codable, Equatable {
     var segmentStarts: [Int]? = nil
     // Snapshot at capture start: changing settings cannot reinterpret old frames.
     var captureOptions: CaptureOptions? = nil
+    // A qualified partial result: never treat it as a complete source backup.
+    var omittedOccludedBottomRows: Bool? = nil
 }

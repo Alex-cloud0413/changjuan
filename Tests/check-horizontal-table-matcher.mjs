@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const work = mkdtempSync(join(tmpdir(), 'LongShotTableMatcherCheck-'));
 const binary = join(work, 'horizontal-table-matcher');
-execFileSync('xcrun', ['swiftc', '-O', '-swift-version', '5',
+execFileSync('xcrun', ['swiftc', '-O', '-swift-version', '5', '-D', 'LONGSHOT_CAPTURE_CHECKS',
   '-module-cache-path', join(work, 'cache'),
   'Shared/OverlapEstimator.swift', 'Shared/HorizontalTableMatcher.swift',
   'Tests/HorizontalTableMatcherCheck.swift', '-o', binary],

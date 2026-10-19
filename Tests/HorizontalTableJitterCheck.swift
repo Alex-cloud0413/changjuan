@@ -81,6 +81,34 @@ struct HorizontalTableJitterCheck {
                 "Prepared and fallback paths must align frozen headings/body to exactly the same original pixels")
         require(try native.frames.map { try Data(contentsOf: $0) } == nativeOriginals,
                 "Registration and rendering must never rewrite the original capture JPEGs")
+        let frozen = try makeFixture(at: root.appendingPathComponent("frozen-columns-jitter"), scale: 3,
+            jitters: jitter, frozenColumns: 188)
+        try validate(frozen, output: root.appendingPathComponent("frozen-columns-jitter-forward"))
+        try validate(frozen, output: root.appendingPathComponent("frozen-columns-jitter-reverse"),
+            frameOrder: Array(frozen.frames.indices.reversed()))
+        try validate(frozen, output: root.appendingPathComponent("frozen-columns-jitter-backtrack"), frameOrder: backtrack)
+        let split = try FrameStitcher(options: CaptureOptions(axis: .horizontal, keepsStatusBar: true), testPageLimit: 1500)
+            .stitch(frameURLs: frozen.frames, sessionURL: root.appendingPathComponent("frozen-columns-paginated"))
+        require(split.outputURLs.count > 1, "Exercise pagination through a registered table body")
+        var origin = 0
+        for url in split.outputURLs {
+            let page = UIImage(contentsOfFile: url.path)!
+            let expected = UIImage(cgImage: frozen.expected.cgImage!.cropping(to: CGRect(x: origin, y: 0,
+                width: page.cgImage!.width, height: frozen.pixelHeight))!)
+            let left = origin == 0 ? 34 * frozen.scale : 0
+            let rect = CGRect(x: left, y: 180 * frozen.scale, width: page.cgImage!.width - left, height: 400 * frozen.scale)
+            require(meanError(page, expected, rect: rect) < 3, "Pagination must preserve global body coordinates without repeating frozen columns")
+            origin += page.cgImage!.width
+        }
+        require(origin == frozen.pixelWidth, "Paginated coverage must equal the complete observed extent")
+        // With a very wide fixed pane, fast swipes can leave cells permanently
+        // behind the floating control even when the unoccluded top overlaps.
+        let hidden = try makeFixture(at: root.appendingPathComponent("frozen-occluded-gap"), scale: 3,
+            jitters: [0, 0, 0, 0], scrollOffsets: [0, 42, 83, 125], frozenColumns: 266)
+        try validatePartial(hidden, output: root.appendingPathComponent("frozen-occluded-gap-output"))
+        let hiddenJitter = try makeFixture(at: root.appendingPathComponent("frozen-occluded-jitter"), scale: 3,
+            jitters: [0, 0, -1, 2], scrollOffsets: [0, 42, 83, 125], frozenColumns: 266)
+        try validatePartial(hiddenJitter, output: root.appendingPathComponent("frozen-occluded-jitter-output"))
         let unproven = try makeFixture(at: root.appendingPathComponent("no-fixed-divider"), scale: 3,
             jitters: [0, 0, -3, -3], scrollOffsets: [0, 42, 42, 83], fixedHeaderDivider: false)
         let originals = try unproven.frames.map { try Data(contentsOf: $0) }
@@ -104,7 +132,7 @@ struct HorizontalTableJitterCheck {
 
     @MainActor static func makeFixture(at directory: URL, scale: Int, jitters: [Int], nativePixelJitters: [Int]? = nil,
                                        scrollOffsets: [Int] = offsets, fixedHeaderDivider: Bool = true,
-                                       identifiableColumns: Bool = true) throws -> Fixture {
+                                       identifiableColumns: Bool = true, frozenColumns: Int = 0) throws -> Fixture {
         precondition(jitters.count == scrollOffsets.count && scrollOffsets.min() == 0)
         let pixelJitters = nativePixelJitters ?? jitters.map { $0 * scale }
         precondition(pixelJitters.count == scrollOffsets.count)
@@ -148,10 +176,20 @@ struct HorizontalTableJitterCheck {
                 context.cgContext.saveGState()
                 context.cgContext.clip(to: CGRect(x: 0, y: columnHeaderTop, width: screenWidth, height: bodyTop - columnHeaderTop))
                 world.draw(at: CGPoint(x: -offset, y: 0))
+                if frozenColumns > 0 {
+                    context.cgContext.saveGState()
+                    context.cgContext.clip(to: CGRect(x: 0, y: columnHeaderTop, width: frozenColumns, height: bodyTop - columnHeaderTop))
+                    world.draw(at: .zero); context.cgContext.restoreGState()
+                }
                 context.cgContext.restoreGState()
                 context.cgContext.saveGState()
                 context.cgContext.clip(to: CGRect(x: 0, y: bodyTop, width: screenWidth, height: bodyBottom - bodyTop))
                 world.draw(at: CGPoint(x: CGFloat(-offset), y: jitterPoints[index]))
+                if frozenColumns > 0 {
+                    context.cgContext.saveGState()
+                    context.cgContext.clip(to: CGRect(x: 0, y: bodyTop, width: frozenColumns, height: bodyBottom - bodyTop))
+                    world.draw(at: CGPoint(x: 0, y: jitterPoints[index])); context.cgContext.restoreGState()
+                }
                 // The row-number rail is frozen horizontally but follows the
                 // body vertically, like the moving table grid.
                 UIColor(white: 0.97, alpha: 1).setFill()
@@ -212,6 +250,7 @@ struct HorizontalTableJitterCheck {
         let result = try FrameStitcher(usePreparedFrames: prepared, options: CaptureOptions(axis: .horizontal, keepsStatusBar: true))
             .stitch(frameURLs: inputs, sessionURL: output)
         require(result.outputURLs.count == 1, "This fixture has exactly one horizontal page")
+        require(!result.omittedOccludedBottomRows, "Recoverable content must never be qualified as partial")
         let image = UIImage(contentsOfFile: result.outputURLs[0].path)!
         require(image.cgImage!.width == fixture.pixelWidth,
                 "Cross-axis registration must not omit or duplicate horizontal columns; expected \(fixture.pixelWidth), got \(image.cgImage!.width); output \(output.path)")
@@ -237,6 +276,24 @@ struct HorizontalTableJitterCheck {
             rect: CGRect(x: 34 * scale, y: y, width: fixture.pixelWidth - 34 * scale, height: scale)) < 3 },
             "Body boundaries must be actual shared source pixels, without duplicated or invented edge rows")
         return result
+    }
+
+    @MainActor static func validatePartial(_ fixture: Fixture, output: URL) throws {
+        let originals = try fixture.frames.map { try Data(contentsOf: $0) }
+        let result = try FrameStitcher(usePreparedFrames: false, options: CaptureOptions(axis: .horizontal, keepsStatusBar: true))
+            .stitch(frameURLs: fixture.frames, sessionURL: output)
+        require(result.omittedOccludedBottomRows, "Unobservable bottom cells require an explicit partial-output flag")
+        let image = UIImage(contentsOfFile: result.outputURLs[0].path)!, scale = fixture.scale
+        require(image.cgImage!.width == fixture.pixelWidth, "Bottom fallback cannot change column coverage")
+        require(image.cgImage!.height < fixture.pixelHeight, "Unsupported button band must not be retained as repeated content")
+        let bodyEnd = image.cgImage!.height - (screenHeight - bodyBottom) * scale
+        let gridCoordinate = bodyEnd + fixture.topTrim - bodyTop * scale
+        let remainder = gridCoordinate % (rowHeight * scale)
+        require(min(remainder, rowHeight * scale - remainder) <= 4, "Fallback must end at a real complete row, even with Y drift")
+        require(meanError(image, fixture.expected, rect: CGRect(x: 34 * scale, y: 180 * scale,
+            width: fixture.pixelWidth - 34 * scale, height: bodyEnd - 180 * scale - 5)) < 3,
+            "Every retained row above the occlusion must match the synthetic oracle")
+        require(try fixture.frames.map { try Data(contentsOf: $0) } == originals, "Partial output never modifies original recordings")
     }
 
     @MainActor static func requireRejected(_ fixture: Fixture, output: URL, message: String) throws {

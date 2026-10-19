@@ -43,6 +43,16 @@ assert.ok(refresh.indexOf('await waitForStorageMaintenance()') < refresh.indexOf
 assert.ok(refresh.indexOf('if CaptureStorage.hasSavedOutputsToPhotos') < refresh.indexOf('await process('),
   'Missing saved preview must never trigger duplicate processing/Photos save');
 const processingSource = model.split('private func process(sessionURL:')[1].split('private func restoreSavedResult')[0];
+assert.ok(processingSource.indexOf('updatedManifest.omittedOccludedBottomRows = result.omittedOccludedBottomRows')
+  < processingSource.indexOf('try CaptureStorage.write(updatedManifest'));
+assert.ok(processingSource.indexOf('try CaptureStorage.write(updatedManifest') < processingSource.indexOf('try await saveToPhotos'),
+  'Partial-output qualification must survive an interruption after Photos commits');
+assert.ok(model.includes('omittedOccludedBottomRows = manifest.omittedOccludedBottomRows == true'));
+assert.ok(model.includes('omittedOccludedBottomRows: selected.manifest.omittedOccludedBottomRows == true'));
+assert.ok(notification.includes('if omittedOccludedBottomRows {'));
+const view = readFileSync(join(root, 'LongShotApp/ContentView.swift'), 'utf8');
+assert.ok(view.includes('omittedOccludedBottomRows: model.omittedOccludedBottomRows'));
+assert.ok(view.includes('.safeAreaInset(edge: .top)'));
 assert.ok(processingSource.indexOf('try await saveToPhotos') < processingSource.indexOf('try CaptureStorage.markOutputsSavedToPhotos'),
   'Success marker follows completed Photos transaction');
 assert.ok(processingSource.indexOf('try CaptureStorage.write(updatedManifest') < processingSource.indexOf('await completeSavedResult('));
@@ -59,7 +69,10 @@ const cache = readFileSync(join(root, 'LongShotApp/FramePreparationCache.swift')
 assert.ok(cache.includes('CaptureStorage.withFrameCacheMutation'));
 assert.ok(cache.includes('guard !CaptureStorage.hasSavedOutputsToPhotos'));
 const project = readFileSync(join(root, 'LongShot.xcodeproj/project.pbxproj'), 'utf8');
-assert.equal((project.match(/MARKETING_VERSION = 1\.1\.2;/g) || []).length, 4);
+const marketingVersions = [...project.matchAll(/MARKETING_VERSION = ([^;]+);/g)].map(match => match[1]);
+assert.equal(marketingVersions.length, 4, 'App and Widgets must each have Debug/Release marketing versions');
+assert.equal(new Set(marketingVersions).size, 1, 'All four configurations must use the same marketing version');
+assert.ok(/^\d+\.\d+\.\d+$/.test(marketingVersions[0]), 'The shared marketing version must be a three-part version');
 const buildVersions = [...project.matchAll(/CURRENT_PROJECT_VERSION = ([^;]+);/g)].map(match => match[1]);
 assert.equal(buildVersions.length, 4, 'App and Widgets must each have Debug/Release build numbers');
 assert.equal(new Set(buildVersions).size, 1, 'All four configurations must use the same build number');

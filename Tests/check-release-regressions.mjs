@@ -97,6 +97,8 @@ try {
   }
   step('horizontal-table-matcher', 'native-algorithm', process.execPath,
     ['Tests/check-horizontal-table-matcher.mjs']);
+  step('horizontal-frozen-panes', 'native-algorithm+synthetic-pixel-oracle', process.execPath,
+    ['Tests/check-horizontal-frozen-panes.mjs', simulator]);
   // Run the focused overlay gate before the longer capture/performance suite.
   step('horizontal-floating-controls', 'native-algorithm+synthetic-visual', process.execPath,
     ['Tests/check-horizontal-floating-controls.mjs', simulator]);
