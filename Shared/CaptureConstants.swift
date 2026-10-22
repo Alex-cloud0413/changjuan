@@ -76,4 +76,15 @@ struct CaptureManifest: Codable, Equatable {
     var captureOptions: CaptureOptions? = nil
     // A qualified partial result: never treat it as a complete source backup.
     var omittedOccludedBottomRows: Bool? = nil
+    // Native capture geometry, recorded only when it changes. Never infer a
+    // target app's captured pixels from the recorder's own window dimensions.
+    var geometrySegments: [CaptureGeometrySegment]? = nil
+    var outputsSeparatedByGeometry: Bool? = nil
+}
+
+struct CaptureGeometrySegment: Codable, Equatable, Sendable {
+    let startFrame: Int
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let videoOrientation: UInt32
 }

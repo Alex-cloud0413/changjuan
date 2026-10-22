@@ -16,7 +16,8 @@ struct CaptureReplayCheck {
         FrameStitcher.alignmentTrace = { traces.append($0); print($0) }
         let result = try FrameStitcher(options: manifest.captureOptions ?? CaptureOptions()).stitch(
             frameURLs: CaptureStorage.frameURLs(in: fixture), sessionURL: output,
-            topCropRatio: manifest.topCropRatio ?? 0.075, segmentStarts: manifest.segmentStarts ?? []
+            topCropRatio: manifest.topCropRatio ?? 0.075, segmentStarts: manifest.segmentStarts ?? [],
+            geometrySegments: manifest.geometrySegments ?? []
         )
         print("timings=\(result.timings)")
         for url in result.outputURLs {

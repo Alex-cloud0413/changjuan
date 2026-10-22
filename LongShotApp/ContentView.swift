@@ -33,17 +33,14 @@ struct ContentView: View {
             ZStack {
                 paperBackground
                 GeometryReader { geometry in
-                    // Keep ordinary sizes on one screen. Accessibility sizes
-                    // may scroll instead of shrinking or hiding useful text.
-                    if dynamicTypeSize.isAccessibilitySize || (geometry.size.height < 650 && dynamicTypeSize >= .xxLarge) {
-                        ScrollView(showsIndicators: false) {
-                            homeContent(compact: true)
-                                .frame(minHeight: geometry.size.height)
-                        }
-                    } else {
-                        homeContent(compact: geometry.size.height < 650)
-                            .frame(height: geometry.size.height)
+                    let region = homeRegion(in: geometry)
+                    ScrollView(showsIndicators: false) {
+                        homeContent(compact: region.height < 650)
+                            .frame(minHeight: region.height)
                     }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .frame(width: region.width, height: region.height)
+                    .position(x: region.midX, y: region.midY)
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
@@ -51,7 +48,8 @@ struct ContentView: View {
                 CaptureSettingsView(model: model)
             }
             .fullScreenCover(isPresented: fullPreviewBinding) {
-                LongImagePreview(urls: model.outputURLs, omittedOccludedBottomRows: model.omittedOccludedBottomRows)
+                LongImagePreview(urls: model.outputURLs, omittedOccludedBottomRows: model.omittedOccludedBottomRows,
+                                 outputsSeparatedByGeometry: model.outputsSeparatedByGeometry)
             }
             .fullScreenCover(isPresented: $showingUsageGuide, onDismiss: completeUsageGuidePresentation) {
                 UsageGuideView(isFirstRun: usageGuideIsInitial) {
@@ -107,6 +105,31 @@ struct ContentView: View {
             usageGuideIsInitial = true
             showingUsageGuide = true
         }
+    }
+
+    /// Keep controls on one usable side of a fold/camera, using the regions
+    /// reported for this view, never a device name or an orientation guess.
+    private func homeRegion(in geometry: GeometryProxy) -> CGRect {
+        var region = CGRect(origin: .zero, size: geometry.size)
+        if #available(iOS 27.1, *) {
+            let reserved = geometry.reservedRegions(kind: .division, layoutDirectionBehavior: .fixed)
+                + geometry.reservedRegions(kind: .occlusion, layoutDirectionBehavior: .fixed)
+            for item in reserved where item.isActive {
+                let blocked = item.frame.inset(by: UIEdgeInsets(top: -item.margins.top, left: -item.margins.leading,
+                    bottom: -item.margins.bottom, right: -item.margins.trailing)).intersection(region)
+                guard !blocked.isNull, !blocked.isEmpty else { continue }
+                let candidates = [
+                    CGRect(x: region.minX, y: region.minY, width: max(0, blocked.minX - region.minX), height: region.height),
+                    CGRect(x: blocked.maxX, y: region.minY, width: max(0, region.maxX - blocked.maxX), height: region.height),
+                    CGRect(x: region.minX, y: region.minY, width: region.width, height: max(0, blocked.minY - region.minY)),
+                    CGRect(x: region.minX, y: blocked.maxY, width: region.width, height: max(0, region.maxY - blocked.maxY))
+                ]
+                if let best = candidates.max(by: { $0.width * $0.height < $1.width * $1.height }), !best.isEmpty {
+                    region = best
+                }
+            }
+        }
+        return region
     }
 
     private func homeContent(compact: Bool) -> some View {
@@ -533,6 +556,7 @@ struct PressScaleButtonStyle: ButtonStyle {
 private struct LongImagePreview: View {
     let urls: [URL]
     let omittedOccludedBottomRows: Bool
+    var outputsSeparatedByGeometry = false
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appLanguage) private var language
@@ -548,7 +572,7 @@ private struct LongImagePreview: View {
                     TabView(selection: $selectedPage) {
                         ForEach(Array(urls.enumerated()), id: \.offset) { index, url in
                             if let image = UIImage(contentsOfFile: url.path) {
-                                ZoomableLongImage(image: image)
+                                ZoomableLongImage(image: image, imageID: url)
                                     .tag(index)
                             } else {
                                 ContentUnavailableView(language.text("无法读取这张长图"), systemImage: "photo.badge.exclamationmark")
@@ -563,6 +587,13 @@ private struct LongImagePreview: View {
             .navigationTitle(previewTitle)
             .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge: .top) {
+                if outputsSeparatedByGeometry {
+                    Text(language.text("屏幕尺寸或方向变化的内容已分开保存"))
+                        .font(.footnote)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                        .background(.regularMaterial)
+                }
                 if omittedOccludedBottomRows {
                     VStack(alignment: .leading, spacing: 4) {
                         Label(language.text("底部遮挡行未收录"), systemImage: "exclamationmark.triangle")
@@ -576,10 +607,12 @@ private struct LongImagePreview: View {
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(language.text("完成")) { dismiss() }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { dismiss() } label: {
+                        Label(language.text("完成"), systemImage: "checkmark")
+                    }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .primaryAction) {
                     Button {
                         showingShareSheet = true
                     } label: {
@@ -601,61 +634,133 @@ private struct LongImagePreview: View {
 
 private struct ZoomableLongImage: UIViewRepresentable {
     let image: UIImage
+    var imageID: URL? = nil
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
+        let scrollView = ResizingScrollView()
         scrollView.delegate = context.coordinator
         scrollView.minimumZoomScale = 1
         scrollView.maximumZoomScale = 4
-        scrollView.alwaysBounceVertical = image.size.height >= image.size.width
-        scrollView.alwaysBounceHorizontal = image.size.width > image.size.height
+        scrollView.contentInsetAdjustmentBehavior = .automatic
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.backgroundColor = .systemBackground
-
         let imageView = context.coordinator.imageView
         imageView.contentMode = .scaleAspectFit
-        imageView.image = image
         scrollView.addSubview(imageView)
+        scrollView.onResize = { [weak coordinator = context.coordinator, weak scrollView] in
+            guard let coordinator, let scrollView else { return }
+            coordinator.layoutImage(in: scrollView, image: coordinator.imageView.image ?? image,
+                                    imageID: coordinator.previousImageID)
+        }
         return scrollView
     }
 
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
-        context.coordinator.imageView.image = image
-        context.coordinator.layoutImage(in: scrollView, image: image)
-        DispatchQueue.main.async {
-            context.coordinator.layoutImage(in: scrollView, image: image)
+        context.coordinator.layoutImage(in: scrollView, image: image, imageID: imageID)
+    }
+
+    class ResizingScrollView: UIScrollView {
+        var onResize: (() -> Void)?
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            onResize?()
+        }
+        override func safeAreaInsetsDidChange() {
+            super.safeAreaInsetsDidChange()
+            onResize?()
         }
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate {
         let imageView = UIImageView()
+        private var previousSize = CGSize.zero
+        private var previousSystemInsets = UIEdgeInsets.zero
+        private var previousImage: UIImage?
+        private(set) var previousImageID: URL?
+        private var readingAnchor = CGPoint.zero
+        private var isLayingOut = false
 
-        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-            imageView
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+
+        private func systemInsets(in scrollView: UIScrollView) -> UIEdgeInsets {
+            let adjusted = scrollView.adjustedContentInset, own = scrollView.contentInset
+            return UIEdgeInsets(top: adjusted.top - own.top, left: adjusted.left - own.left,
+                                bottom: adjusted.bottom - own.bottom, right: adjusted.right - own.right)
+        }
+
+        private func viewport(size: CGSize, insets: UIEdgeInsets) -> CGRect {
+            CGRect(x: insets.left, y: insets.top,
+                width: max(0, size.width - insets.left - insets.right),
+                height: max(0, size.height - insets.top - insets.bottom))
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            let horizontalInset = max((scrollView.bounds.width - scrollView.contentSize.width) / 2, 0)
-            let verticalInset = max((scrollView.bounds.height - scrollView.contentSize.height) / 2, 0)
-            scrollView.contentInset = UIEdgeInsets(
-                top: verticalInset,
-                left: horizontalInset,
-                bottom: verticalInset,
-                right: horizontalInset
-            )
+            let visible = viewport(size: scrollView.bounds.size, insets: systemInsets(in: scrollView))
+            let horizontal = max((visible.width - scrollView.contentSize.width) / 2, 0)
+            let vertical = max((visible.height - scrollView.contentSize.height) / 2, 0)
+            let inset = UIEdgeInsets(top: vertical, left: horizontal, bottom: vertical, right: horizontal)
+            if scrollView.contentInset != inset { scrollView.contentInset = inset }
+            rememberReadingPosition(in: scrollView)
         }
 
-        func layoutImage(in scrollView: UIScrollView, image: UIImage) {
-            guard scrollView.bounds.width > 0, image.size.width > 0 else { return }
+        func scrollViewDidScroll(_ scrollView: UIScrollView) { rememberReadingPosition(in: scrollView) }
+
+        func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) {
+            guard let image = imageView.image else { return }
+            layoutImage(in: scrollView, image: image, imageID: previousImageID)
+        }
+
+        private func rememberReadingPosition(in scrollView: UIScrollView) {
+            guard !isLayingOut, previousImage != nil, previousSize == scrollView.bounds.size,
+                  previousSystemInsets == systemInsets(in: scrollView) else { return }
+            readingAnchor = anchor(in: scrollView)
+        }
+
+        private func anchor(in scrollView: UIScrollView) -> CGPoint {
+            let visible = viewport(size: scrollView.bounds.size, insets: systemInsets(in: scrollView))
+            let point = imageView.convert(CGPoint(x: scrollView.contentOffset.x + visible.midX,
+                y: scrollView.contentOffset.y + visible.midY), from: scrollView)
+            return CGPoint(x: point.x / max(1, imageView.bounds.width), y: point.y / max(1, imageView.bounds.height))
+        }
+
+        func layoutImage(in scrollView: UIScrollView, image: UIImage, imageID: URL? = nil) {
+            let size = scrollView.bounds.size
+            let system = systemInsets(in: scrollView)
+            let visible = viewport(size: size, insets: system)
+            let sameImage = previousImage === image || (imageID != nil && previousImageID == imageID)
+            guard !isLayingOut, visible.width > 0, visible.height > 0,
+                  image.size.width > 0, image.size.height > 0,
+                  size != previousSize || system != previousSystemInsets || !sameImage else { return }
+            isLayingOut = true
+            defer { isLayingOut = false }
+            let restoring = sameImage && previousSize != .zero
+            let oldZoom = restoring ? scrollView.zoomScale : 1
+            let savedAnchor = readingAnchor
+            scrollView.setZoomScale(1, animated: false)
+            imageView.image = image
             let wide = image.size.width > image.size.height
-            let scale = wide ? min(1, scrollView.bounds.height / image.size.height)
-                : scrollView.bounds.width / image.size.width
-            imageView.frame = CGRect(x: 0, y: 0, width: image.size.width * scale, height: image.size.height * scale)
-            scrollView.contentSize = imageView.frame.size
+            let fit = wide ? min(1, visible.height / image.size.height) : visible.width / image.size.width
+            let base = CGSize(width: image.size.width * fit, height: image.size.height * fit)
+            imageView.frame = CGRect(origin: .zero, size: base)
+            scrollView.contentSize = base
+            scrollView.alwaysBounceVertical = !wide
+            scrollView.alwaysBounceHorizontal = wide
+            scrollView.setZoomScale(oldZoom, animated: false)
+            scrollViewDidZoom(scrollView)
+            let point = imageView.convert(CGPoint(x: savedAnchor.x * base.width, y: savedAnchor.y * base.height), to: scrollView)
+            let inset = scrollView.adjustedContentInset
+            let desired = restoring ? CGPoint(x: point.x - visible.midX, y: point.y - visible.midY)
+                : CGPoint(x: -inset.left, y: -inset.top)
+            scrollView.contentOffset = CGPoint(
+                x: min(max(-inset.left, desired.x), max(-inset.left, scrollView.contentSize.width - size.width + inset.right)),
+                y: min(max(-inset.top, desired.y), max(-inset.top, scrollView.contentSize.height - size.height + inset.bottom)))
+            previousSize = size
+            previousSystemInsets = system
+            previousImage = image
+            previousImageID = imageID
+            readingAnchor = anchor(in: scrollView)
         }
     }
 }
@@ -689,11 +794,11 @@ struct CaptureSettingsView: View {
                     Text(language.text("横向适合左右拖动的表格。一次录制只使用一种方向；更改仅影响新录制。"))
                 }
                 Section {
-                    Toggle(language.text("保留顶部状态栏"), isOn: $keepsStatusBar)
+                    Toggle(language.text("保留状态栏"), isOn: $keepsStatusBar)
                         .accessibilityIdentifier("settings.statusBar")
                         .disabled(model.isBusy)
                 } footer: {
-                    Text(language.text("保留实际录制到的时间、信号和电量，也可能包含录制指示。默认关闭。"))
+                    Text(language.text("保留实际录制到的时间、信号和电量，也可能包含录制指示。无法确认状态栏边界时保留完整画面，避免裁掉正文。"))
                 }
                 Section {
                     Button(role: .destructive) { confirmingCleanup = true } label: {
@@ -727,7 +832,9 @@ struct CaptureSettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(language.text("完成")) { dismiss() }
+                    Button { dismiss() } label: {
+                        Label(language.text("完成"), systemImage: "checkmark")
+                    }
                 }
             }
             .alert(language.text("清理所有缓存？"), isPresented: $confirmingCleanup) {

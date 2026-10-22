@@ -23,15 +23,17 @@ struct ScreenFramePipelineCheck {
         try testExplicitFinishWhileHostIsVisible()
         try testEmptyCaptureFails()
         try testExplicitPageTransitions()
+        try testGeometryChangesAndPausedResume()
+        try testSideBySideHostFailsExplicitly()
         try testPreparationBackpressurePreservesAllFrames()
         try testPreparationFailurePreservesAllFrames()
         try testLatePreparationCannotRecreateCleanedFiles()
         try testOptionsSnapshotAndManualCleanup()
         try benchmarkFullSizeFrames()
 #if LONGSHOT_SCK_METADATA_STUB
-        print("ScreenFramePipeline JPEG/queue checks passed (10); SCK metadata/stream unavailable and excluded on this runtime.")
+        print("ScreenFramePipeline JPEG/queue checks passed (12); SCK metadata/stream unavailable and excluded on this runtime.")
 #else
-        print("ScreenFramePipeline checks passed (10)")
+        print("ScreenFramePipeline checks passed (12)")
 #endif
         print("Fixtures: \(directory.path)")
     }
@@ -108,6 +110,59 @@ struct ScreenFramePipelineCheck {
         _ = try pipeline.beginSession(topCropRatio: 0.075)
         require(!pipeline.isPausedForNextPage)
         _ = pipeline.finishSession(autoStopped: false, trimTrailingFrames: false)
+    }
+
+    private static func testGeometryChangesAndPausedResume() throws {
+        let pipeline = ScreenFramePipeline(hostIsForeground: { false })
+        let session = try pipeline.beginSession(topCropRatio: 0)
+        for index in 0..<4 { _ = pipeline.consume(try makeSample(index: index)) }
+        for index in 4..<8 { _ = pipeline.consume(try makeSample(index: index, width: 240, height: 260)) }
+        require(pipeline.togglePageTransition())
+        requireNoneForGeometry(pipeline.consume(try makeSample(index: 8, width: 300, height: 120)))
+        require(!pipeline.togglePageTransition())
+        for index in 9..<13 { _ = pipeline.consume(try makeSample(index: index, width: 120, height: 260)) }
+        let completion = pipeline.finishSession(autoStopped: false, trimTrailingFrames: false)!
+        require(completion.manifest.segmentStarts == [0, 4, 8])
+        require(completion.manifest.geometrySegments?.map(\.startFrame) == [0, 4, 8])
+        require(completion.manifest.geometrySegments?.map(\.pixelWidth) == [120, 240, 120])
+        require(completion.manifest.frameCount == 12)
+        require(try CaptureStorage.frameURLs(in: session).count == 12)
+        let decoded = try CaptureStorage.readManifest(at: session)
+        require(decoded.geometrySegments == completion.manifest.geometrySegments)
+        print("Native geometry changes create ordered page boundaries; paused transitions add no empty pages; raw JPEGs and metadata round trip")
+    }
+
+    private static func requireNoneForGeometry(_ event: ScreenFramePipeline.Event) {
+        guard case .none = event else { fatalError("Paused geometry must not enter raw frames") }
+    }
+
+    private static func testSideBySideHostFailsExplicitly() throws {
+        let visibility = ScreenCaptureHostVisibility()
+        visibility.setForeground(false)
+        let pipeline = ScreenFramePipeline(hostIsForeground: { visibility.isForeground },
+            hostHasPartialWindow: { visibility.hasVisiblePartialWindow })
+        let session = try pipeline.beginSession(topCropRatio: 0)
+        _ = pipeline.consume(try makeSample(index: 0))
+        let original = try Data(contentsOf: CaptureStorage.frameURL(index: 0, sessionURL: session))
+        visibility.setPartialWindow(true)
+        visibility.setForeground(true)
+        guard case .failed(let message) = pipeline.consume(try makeSample(index: 1)) else {
+            fatalError("Unsupported side-by-side capture must fail explicitly instead of silently dropping every target frame")
+        }
+        require(message.contains("全屏"))
+        let result = pipeline.finishSession(autoStopped: false, trimTrailingFrames: false)!
+        require(result.manifest.state == .failed && result.manifest.frameCount == 1)
+        require(try Data(contentsOf: CaptureStorage.frameURL(index: 0, sessionURL: session)) == original)
+        let initiallyInactive = ScreenCaptureHostVisibility()
+        initiallyInactive.setPartialWindow(true)
+        initiallyInactive.setSceneActivationState(.foregroundInactive)
+        let cold = ScreenFramePipeline(hostIsForeground: { initiallyInactive.isForeground },
+            hostHasPartialWindow: { initiallyInactive.hasVisiblePartialWindow })
+        _ = try cold.beginSession(topCropRatio: 0)
+        guard case .failed = cold.consume(try makeSample(index: 0)) else {
+            fatalError("An initially inactive but visible host window must never enter captured pixels")
+        }
+        require(cold.finishSession(autoStopped: false, trimTrailingFrames: false)?.manifest.frameCount == 0)
     }
 
     private static func benchmarkFullSizeFrames() throws {

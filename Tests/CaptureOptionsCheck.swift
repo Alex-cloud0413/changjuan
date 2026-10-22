@@ -154,6 +154,36 @@ struct CaptureOptionsCheck {
         let portrait = UIImage(contentsOfFile: frames[0].path)!
         coordinator.layoutImage(in: scroll, image: portrait)
         require(scroll.contentSize == CGSize(width: 390, height: 844), "Existing vertical preview still fits width")
+        let resizing = ZoomableLongImage.ResizingScrollView(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        resizing.minimumZoomScale = 1; resizing.maximumZoomScale = 4
+        resizing.contentInsetAdjustmentBehavior = .automatic
+        let resizeCoordinator = ZoomableLongImage(image: portrait).makeCoordinator()
+        resizing.delegate = resizeCoordinator
+        resizing.addSubview(resizeCoordinator.imageView)
+        let sourceID = frames[0]
+        resizing.onResize = { resizeCoordinator.layoutImage(in: resizing, image: portrait, imageID: sourceID) }
+        resizing.layoutIfNeeded()
+        resizing.setZoomScale(2, animated: false)
+        resizing.contentOffset = CGPoint(x: 150, y: 480)
+        func readingAnchor() -> CGPoint {
+            let point = resizeCoordinator.imageView.convert(CGPoint(x: resizing.bounds.midX, y: resizing.bounds.midY), from: resizing)
+            return CGPoint(x: point.x / resizeCoordinator.imageView.bounds.width, y: point.y / resizeCoordinator.imageView.bounds.height)
+        }
+        let anchor = readingAnchor()
+        resizing.frame.size = CGSize(width: 700, height: 390)
+        resizing.setNeedsLayout(); resizing.layoutIfNeeded()
+        let after = readingAnchor()
+        require(abs(resizing.zoomScale - 2) < 0.001, "Resize preserves relative zoom")
+        require(abs(anchor.x - after.x) < 0.002 && abs(anchor.y - after.y) < 0.002,
+                "Resize preserves the normalized reading center: \(anchor) -> \(after)")
+        let offset = resizing.contentOffset
+        resizeCoordinator.layoutImage(in: resizing, image: UIImage(contentsOfFile: frames[0].path)!, imageID: sourceID)
+        require(resizing.contentOffset == offset && resizing.zoomScale == 2,
+                "SwiftUI re-decoding the same URL must not reset the reading position")
+        resizing.frame.size = CGSize(width: 390, height: 700)
+        resizing.setNeedsLayout(); resizing.layoutIfNeeded()
+        let restored = readingAnchor()
+        require(abs(restored.x - anchor.x) < 0.002 && abs(restored.y - anchor.y) < 0.002, "Fold round trip preserves reading center")
         print(String(format: "Horizontal 1170x2532, 6 prepared frames: %.4fs", full.timings.total))
         print("Capture options passed: \(checks) checks; horizontal table MAE \(error); fixtures \(root.path)")
     }

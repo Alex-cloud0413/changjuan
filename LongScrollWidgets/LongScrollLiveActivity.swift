@@ -51,9 +51,10 @@ struct LongScrollLiveActivity: Widget {
                 Image(systemName: statusSymbol(for: context.state.phase))
                     .foregroundStyle(statusColor(for: context.state.phase))
             } compactTrailing: {
-                Text(shortStatus(for: context.state))
-                    .font(.caption2.monospacedDigit())
-                    .accessibilityLabel(context.state.language.text("长按灵动岛，显示接下一页、继续和完成按钮"))
+                Image(systemName: context.state.phase == .capturing ? "ellipsis" : statusSymbol(for: context.state.phase))
+                    .foregroundStyle(statusColor(for: context.state.phase))
+                    .accessibilityLabel(statusTitle(for: context.state))
+                    .accessibilityHint(context.state.language.text("长按灵动岛，显示接下一页、继续和完成按钮"))
             } minimal: {
                 Image(systemName: statusSymbol(for: context.state.phase))
                     .foregroundStyle(statusColor(for: context.state.phase))
@@ -222,7 +223,8 @@ private struct CaptureActivityActions: View {
     var body: some View {
         HStack(spacing: 8) {
             Button(intent: NextLongScrollPageIntent()) {
-                Text(language.text(paused ? "继续" : "接下一页"))
+                Label(language.text(paused ? "继续" : "接下一页"), systemImage: paused ? "play.fill" : "rectangle.stack.badge.plus")
+                    .labelStyle(.titleOnly)
                     .font(.subheadline.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 8)
@@ -233,7 +235,8 @@ private struct CaptureActivityActions: View {
             .accessibilityLabel(language.text(paused ? "在新页面继续收卷" : "暂停收卷，接下一页"))
 
             Button(intent: FinishLongScrollIntent()) {
-                Text(language.text("完成"))
+                Label(language.text("完成"), systemImage: "checkmark")
+                    .labelStyle(.titleOnly)
                     .font(.subheadline.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 10)

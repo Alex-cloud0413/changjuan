@@ -5,7 +5,6 @@ import UserNotifications
 @main
 struct LongShotApp: App {
     @UIApplicationDelegateAdaptor(LongShotApplicationDelegate.self) private var appDelegate
-    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model: AppModel
 
     init() {
@@ -14,31 +13,64 @@ struct LongShotApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
-            ContentView(model: model)
-                .preferredColorScheme(.light)
-                .task {
-                    await model.activate()
-                }
-                .onChange(of: scenePhase) { _, newPhase in
+        WindowGroup { LongShotSceneRoot(model: model) }
+    }
+}
+
+/// Scene phase belongs to this window, not the aggregate phase of an App.
+private struct LongShotSceneRoot: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        ContentView(model: model)
+            .preferredColorScheme(.light)
+            .background(CaptureHostWindowObserver().allowsHitTesting(false).accessibilityHidden(true))
+            .task {
+                publishVisibility(scenePhase)
+                await model.activate()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                publishVisibility(phase)
+                guard phase == .active else { return }
+                Task { await model.activate() }
+            }
+    }
+
+    private func publishVisibility(_ phase: ScenePhase) {
 #if LONGSHOT_SCREEN_CAPTURE_KIT
-                    if newPhase == .active {
-                        ScreenCaptureHostVisibility.shared.setForeground(true)
-                    } else if newPhase == .background {
-                        ScreenCaptureHostVisibility.shared.setForeground(false)
-                    }
+        if phase == .active { ScreenCaptureHostVisibility.shared.setForeground(true) }
+        else if phase == .background { ScreenCaptureHostVisibility.shared.setForeground(false) }
 #else
-                    if newPhase == .active {
-                        ReplayBroadcastStore.setHostForeground(true)
-                    } else if newPhase == .background {
-                        ReplayBroadcastStore.setHostForeground(false)
-                    }
+        if phase == .active { ReplayBroadcastStore.setHostForeground(true) }
+        else if phase == .background { ReplayBroadcastStore.setHostForeground(false) }
 #endif
-                    guard newPhase == .active else { return }
-                    Task {
-                        await model.activate()
-                    }
-                }
+        // Inactive preserves visibility while a system consent sheet covers us.
+    }
+}
+
+private struct CaptureHostWindowObserver: UIViewRepresentable {
+    func makeUIView(context: Context) -> Observer { Observer() }
+    func updateUIView(_ view: Observer, context: Context) { view.setNeedsLayout() }
+
+    final class Observer: UIView {
+        override func didMoveToWindow() { super.didMoveToWindow(); updateCaptureScope() }
+        override func layoutSubviews() { super.layoutSubviews(); updateCaptureScope() }
+        private func updateCaptureScope() {
+#if LONGSHOT_SCREEN_CAPTURE_KIT
+            guard let window, let scene = window.windowScene else { return }
+            // In split view an unfocused scene can be visible without ever
+            // becoming active. Visibility is stricter than permission to prompt.
+            ScreenCaptureHostVisibility.shared.setSceneActivationState(scene.activationState)
+            // This answers only whether *our own UI* occupies part of the
+            // captured display. Never use these bounds to crop the target app.
+            let display = scene.screen.coordinateSpace
+            let visible = window.convert(window.bounds, to: display)
+            let full = display.bounds
+            let partial = abs(visible.minX - full.minX) > 1 || abs(visible.minY - full.minY) > 1
+                || abs(visible.width - full.width) > 1 || abs(visible.height - full.height) > 1
+            ScreenCaptureHostVisibility.shared.setPartialWindow(partial)
+#endif
         }
     }
 }
@@ -130,7 +162,8 @@ final class LongShotApplicationDelegate: NSObject, UIApplicationDelegate, UNUser
             let result = try await Task.detached(priority: .userInitiated) {
                 try FrameStitcher(options: latest.manifest.captureOptions ?? CaptureOptions()).stitch(
                     frameURLs: frames, sessionURL: destination, topCropRatio: cropRatio,
-                    segmentStarts: latest.manifest.segmentStarts ?? []
+                    segmentStarts: latest.manifest.segmentStarts ?? [],
+                    geometrySegments: latest.manifest.geometrySegments ?? []
                 )
             }.value
             let report: [String: Any] = [

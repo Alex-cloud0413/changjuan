@@ -39,6 +39,7 @@ struct StitchResult {
     let preparedFrameCount: Int
     let preparedAlignmentCount: Int
     var omittedOccludedBottomRows = false
+    var outputsSeparatedByGeometry = false
 }
 
 struct StitchTimings: Codable {
@@ -369,14 +370,14 @@ final class FrameStitcher {
         frameURLs: [URL],
         sessionURL: URL,
         topCropRatio: Double = 0.075,
-        segmentStarts: [Int] = []
+        segmentStarts: [Int] = [],
+        geometrySegments: [CaptureGeometrySegment] = []
     ) throws -> StitchResult {
         let started = ProcessInfo.processInfo.systemUptime
         guard !frameURLs.isEmpty else { throw StitchError.notEnoughFrames }
 
         var samples: [FrameSample] = []
         var preparedFrameCount = 0
-        var preparedAlignmentCount = 0
         samples.reserveCapacity(frameURLs.count)
         for url in frameURLs {
             samples.append(try autoreleasepool {
@@ -394,6 +395,96 @@ final class FrameStitcher {
 
         let sampled = ProcessInfo.processInfo.systemUptime
         let starts = Array(Set([0] + segmentStarts.filter { $0 >= 0 && $0 < samples.count })).sorted()
+        let ranges = starts.enumerated().map { index, start in
+            start..<(index + 1 < starts.count ? starts[index + 1] : samples.count)
+        }
+        // Validate *within* declared pages before attempting any match. Old
+        // unsegmented recordings still reject unexplained geometry changes.
+        for range in ranges {
+            guard range.allSatisfy({ samples[$0].imageSize == samples[range.lowerBound].imageSize }) else {
+                throw StitchError.inconsistentFrameSize
+            }
+        }
+        let geometryStarts = Set(geometrySegments.dropFirst().map(\.startFrame))
+        if !geometrySegments.isEmpty {
+            guard geometrySegments.first?.startFrame == 0,
+                  Set(geometrySegments.map(\.startFrame)).count == geometrySegments.count,
+                  geometrySegments.map(\.startFrame) == geometrySegments.map(\.startFrame).sorted() else {
+                throw StitchError.inconsistentFrameSize
+            }
+            for record in geometrySegments {
+                guard starts.contains(record.startFrame) else { throw StitchError.inconsistentFrameSize }
+                let expected = options.axis == .horizontal
+                    ? CGSize(width: record.pixelHeight, height: record.pixelWidth)
+                    : CGSize(width: record.pixelWidth, height: record.pixelHeight)
+                guard expected == samples[record.startFrame].imageSize else { throw StitchError.inconsistentFrameSize }
+            }
+        }
+        var groupStarts = [0]
+        for start in starts.dropFirst() {
+            if samples[start].imageSize != samples[start - 1].imageSize || geometryStarts.contains(start) {
+                groupStarts.append(start)
+            }
+        }
+        if groupStarts.count > 1 {
+            return try stitchGeometryGroups(samples: samples, starts: groupStarts, segmentStarts: starts,
+                sessionURL: sessionURL, topCropRatio: topCropRatio, started: started,
+                sampled: sampled, preparedFrameCount: preparedFrameCount)
+        }
+        return try stitchUniformSamples(samples, sessionURL: sessionURL, topCropRatio: topCropRatio,
+            segmentStarts: starts, started: started, sampled: sampled, preparedFrameCount: preparedFrameCount)
+    }
+
+    /// Independent native-size outputs are the only honest join when a fold
+    /// reflows text or columns. Render into staging so a failed later page can
+    /// never replace an earlier complete output or report a partial success.
+    private func stitchGeometryGroups(samples: [FrameSample], starts: [Int], segmentStarts: [Int],
+        sessionURL: URL, topCropRatio: Double, started: Double, sampled: Double,
+        preparedFrameCount: Int) throws -> StitchResult {
+        let files = FileManager.default
+        let staging = sessionURL.appendingPathComponent(".geometry-\(UUID().uuidString)", isDirectory: true)
+        try files.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? files.removeItem(at: staging) }
+        var results: [StitchResult] = []
+        for (index, start) in starts.enumerated() {
+            let end = index + 1 < starts.count ? starts[index + 1] : samples.count
+            let localStarts = segmentStarts.filter { $0 >= start && $0 < end }.map { $0 - start }
+            let group = Array(samples[start..<end])
+            let groupStarted = ProcessInfo.processInfo.systemUptime
+            results.append(try stitchUniformSamples(group,
+                sessionURL: staging.appendingPathComponent(String(index)), topCropRatio: topCropRatio,
+                segmentStarts: localStarts, started: groupStarted, sampled: groupStarted, preparedFrameCount: 0,
+                allowsStaticPages: true))
+        }
+        let outputDirectory = try CaptureStorage.outputsDirectory(in: sessionURL)
+        try removeOldOutputs(from: outputDirectory)
+        var outputs: [URL] = []
+        for result in results {
+            for source in result.outputURLs {
+                let destination = outputDirectory.appendingPathComponent(String(format: "longshot-%02d.jpg", outputs.count + 1))
+                try files.moveItem(at: source, to: destination)
+                outputs.append(destination)
+            }
+        }
+        return StitchResult(outputURLs: outputs,
+            acceptedFrameCount: results.reduce(0) { $0 + $1.acceptedFrameCount },
+            skippedFrameCount: results.reduce(0) { $0 + $1.skippedFrameCount },
+            timings: StitchTimings(sampling: sampled - started,
+                selection: results.reduce(0) { $0 + $1.timings.selection },
+                assembly: results.reduce(0) { $0 + $1.timings.assembly },
+                rendering: results.reduce(0) { $0 + $1.timings.rendering },
+                total: ProcessInfo.processInfo.systemUptime - started),
+            preparedFrameCount: preparedFrameCount,
+            preparedAlignmentCount: results.reduce(0) { $0 + $1.preparedAlignmentCount },
+            omittedOccludedBottomRows: results.contains { $0.omittedOccludedBottomRows },
+            outputsSeparatedByGeometry: true)
+    }
+
+    private func stitchUniformSamples(_ samples: [FrameSample], sessionURL: URL, topCropRatio: Double,
+        segmentStarts: [Int], started: Double, sampled: Double, preparedFrameCount: Int,
+        allowsStaticPages: Bool = false) throws -> StitchResult {
+        var preparedAlignmentCount = 0
+        let starts = segmentStarts
         let ranges = starts.enumerated().map { index, start in
             start..<(index + 1 < starts.count ? starts[index + 1] : samples.count)
         }
@@ -693,7 +784,7 @@ final class FrameStitcher {
                     positioned.append(PositionedFrame(index: current, offset: offset))
                 }
                 if positioned.map(\.offset).min() == positioned.map(\.offset).max() {
-                    guard ranges.count > 1 else { continue }
+                    guard ranges.count > 1 || allowsStaticPages else { continue }
                     // Explicit page boundaries also support a stationary page.
                     // Do not mistake an unrelated or unmatched ending for one.
                     guard indices.allSatisfy({ gridByIndex[$0] != nil || sameViewport(samples[indices[0]].gray, samples[$0].gray) }),
@@ -743,7 +834,7 @@ final class FrameStitcher {
                     if ranges.count > 1 { throw StitchError.unusablePage(pageIndex + 1) }
                     continue
                 }
-            } else if ranges.count > 1 {
+            } else if ranges.count > 1 || allowsStaticPages {
                 // Explicitly separated static pages are valid screenshots too.
                 // A lone stationary capture still fails rather than saving UI.
                 let stationary = indices.allSatisfy {

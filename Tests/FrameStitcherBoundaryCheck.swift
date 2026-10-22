@@ -46,6 +46,7 @@ struct FrameStitcherBoundaryCheck {
         try verifyPixelAccurateAlignment(in: directory)
         try verifyBidirectionalAndPageSegments(targetFrames, in: directory)
         try verifyOverlayDetection(in: directory)
+        try verifyGeometrySegments(targetFrames, in: directory)
         try verifyInvalidInputs(targetFrames, in: directory)
         try verifyPreparedFrameEquivalence(targetFrames, in: directory)
         try verifyFullSizePreparation(in: directory)
@@ -259,6 +260,56 @@ struct FrameStitcherBoundaryCheck {
         require(FramePreparationCache.load(for: frames[2]) == nil)
         try compare(frames, "missing-corrupt-stale", expectedHits: frames.count - 3)
         for (url, original) in zip(all, originals) { require(try Data(contentsOf: url) == original) }
+    }
+
+    private static func verifyGeometrySegments(_ frames: [URL], in directory: URL) throws {
+        var narrower: [URL] = []
+        for (index, source) in frames.enumerated() {
+            let cg = UIImage(contentsOfFile: source.path)!.cgImage!
+            let cropped = cg.cropping(to: CGRect(x: 0, y: 0, width: cg.width - 40, height: cg.height))!
+            let url = directory.appendingPathComponent("native-narrow-\(index).jpg")
+            try UIImage(cgImage: cropped).jpegData(compressionQuality: 0.94)!.write(to: url)
+            narrower.append(url)
+        }
+        func stitch(_ input: [URL], _ name: String, starts: [Int] = [], geometry: [CaptureGeometrySegment] = [], cached: Bool = true) throws -> StitchResult {
+            try FrameStitcher(usePreparedFrames: cached).stitch(frameURLs: input,
+                sessionURL: directory.appendingPathComponent(name), topCropRatio: 0,
+                segmentStarts: starts, geometrySegments: geometry)
+        }
+        let first = try stitch(frames, "geometry-reference-first")
+        let second = try stitch(narrower, "geometry-reference-second")
+        let sources = frames + narrower + frames
+        let originalBytes = try sources.map { try Data(contentsOf: $0) }
+        let segmented = try stitch(sources, "geometry-open-close", starts: [0, frames.count, frames.count * 2])
+        let expected = first.outputURLs + second.outputURLs + first.outputURLs
+        require(segmented.outputURLs.count == expected.count)
+        for (actual, reference) in zip(segmented.outputURLs, expected) {
+            require(try Data(contentsOf: actual) == Data(contentsOf: reference))
+        }
+        require(segmented.acceptedFrameCount == first.acceptedFrameCount * 2 + second.acceptedFrameCount)
+        // An orientation metadata boundary is meaningful even at equal sizes.
+        let size = try imageSize(at: frames[0])
+        let records = [CaptureGeometrySegment(startFrame: 0, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 1),
+            CaptureGeometrySegment(startFrame: frames.count, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 3)]
+        let turned = try stitch(frames + frames, "geometry-half-turn", starts: [0, frames.count], geometry: records)
+        require(turned.outputURLs.count == first.outputURLs.count * 2)
+        // A short new segment preserves the actual observed frame at native width.
+        let short = try stitch(frames + [narrower[0]], "geometry-short", starts: [0, frames.count])
+        require(short.outputURLs.count == first.outputURLs.count + 1)
+        require(try imageSize(at: short.outputURLs.last!).width == imageSize(at: narrower[0]).width)
+        // Failed later geometry cannot clear an existing complete output.
+        let badSession = directory.appendingPathComponent("geometry-bad")
+        let output = try CaptureStorage.outputsDirectory(in: badSession).appendingPathComponent("longshot-01.jpg")
+        let prior = Data("previous complete result".utf8)
+        try prior.write(to: output)
+        do {
+            _ = try FrameStitcher().stitch(frameURLs: frames + [narrower[0], directory.appendingPathComponent("unrelated.jpg")],
+                sessionURL: badSession, segmentStarts: [0, frames.count])
+            fatalError("A malformed new segment must not be silently omitted")
+        } catch is StitchError {}
+        require(try Data(contentsOf: output) == prior)
+        for (url, bytes) in zip(sources, originalBytes) { require(try Data(contentsOf: url) == bytes) }
+        print("Geometry segments passed: fold/unfold native widths, ordered byte-identical outputs, same-size turn, short segment, failed group preserves prior output and all raw bytes")
     }
 
     private static func verifyInvalidInputs(_ frames: [URL], in directory: URL) throws {

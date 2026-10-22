@@ -104,6 +104,8 @@ try {
     ['Tests/check-horizontal-floating-controls.mjs', simulator]);
   step('capture-pipeline-diagnostics', 'native-with-SCK-metadata-stubs', process.execPath,
     ['Tests/check-capture-pipeline-diagnostics.mjs', simulator]);
+  step('duo-preview', 'native-UIKit+injected-system-insets', process.execPath,
+    ['Tests/check-duo-preview.mjs', simulator]);
   const captureLog = step('capture', 'optimized-simulator-behavior', process.execPath,
     ['Tests/check-capture-improvements.mjs', simulator], {
       LONGSHOT_STITCH_BASELINE: join(output, 'baseline-FrameStitcher.swift'),

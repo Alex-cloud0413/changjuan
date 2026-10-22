@@ -21,6 +21,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var outputURLs: [URL] = []
     @Published private(set) var previewImage: UIImage?
     @Published private(set) var omittedOccludedBottomRows = false
+    @Published private(set) var outputsSeparatedByGeometry = false
     @Published private(set) var lastCaptureDate: Date?
     @Published private(set) var isSavedPreviewRequested = false
     @Published private(set) var isSavedThumbnailPresented = false
@@ -416,7 +417,8 @@ final class AppModel: ObservableObject {
                     frameURLs: frames,
                     sessionURL: sessionURL,
                     topCropRatio: manifest.topCropRatio ?? 0.075,
-                    segmentStarts: manifest.segmentStarts ?? []
+                    segmentStarts: manifest.segmentStarts ?? [],
+                    geometrySegments: manifest.geometrySegments ?? []
                 )
                 return (result, startedAt, ProcessInfo.processInfo.systemUptime)
             }.value
@@ -442,6 +444,7 @@ final class AppModel: ObservableObject {
             // after a process interruption between Photos and final metadata.
             var updatedManifest = manifest
             updatedManifest.omittedOccludedBottomRows = result.omittedOccludedBottomRows
+            updatedManifest.outputsSeparatedByGeometry = result.outputsSeparatedByGeometry
             try CaptureStorage.write(updatedManifest, to: sessionURL)
             let photosTiming = try await saveToPhotos(result.outputURLs, sessionID: manifest.id)
             timing.merge(photosTiming) { _, new in new }
@@ -485,6 +488,7 @@ final class AppModel: ObservableObject {
         lastCaptureDate = manifest.startedAt
         outputURLs = urls
         omittedOccludedBottomRows = manifest.omittedOccludedBottomRows == true
+        outputsSeparatedByGeometry = manifest.outputsSeparatedByGeometry == true
         previewImage = urls.first.flatMap { UIImage(contentsOfFile: $0.path) }
         phase = .ready(
             pageCount: urls.count,
@@ -523,7 +527,8 @@ final class AppModel: ObservableObject {
             sessionURL: sessionURL,
             sessionID: manifest.id,
             pageCount: urls.count,
-            omittedOccludedBottomRows: manifest.omittedOccludedBottomRows == true
+            omittedOccludedBottomRows: manifest.omittedOccludedBottomRows == true,
+            outputsSeparatedByGeometry: manifest.outputsSeparatedByGeometry == true
         )
         CaptureProcessingDiagnostics.record("resultNotificationFinished", sessionID: manifest.id)
         resultDeliverySessions.remove(manifest.id)
@@ -657,7 +662,8 @@ final class AppModel: ObservableObject {
         await resultNotificationManager.postSavedResult(
             image: UIImage(contentsOfFile: existing[0].path),
             sessionURL: selected.url, sessionID: sessionID, pageCount: existing.count,
-            omittedOccludedBottomRows: selected.manifest.omittedOccludedBottomRows == true
+            omittedOccludedBottomRows: selected.manifest.omittedOccludedBottomRows == true,
+            outputsSeparatedByGeometry: selected.manifest.outputsSeparatedByGeometry == true
         )
         resultDeliverySessions.remove(sessionID)
         scheduleStorageMaintenance()

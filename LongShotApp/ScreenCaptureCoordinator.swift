@@ -153,9 +153,10 @@ final class ScreenCaptureCoordinator: NSObject {
         var startingStream: SCStream?
 
         do {
-            let topCropRatio = Self.systemTopCropRatio()
             let sessionURL = try captureQueue.sync {
-                try pipeline.beginSession(topCropRatio: topCropRatio)
+                // The sharing API exposes captured pixels, not another app's
+                // safe area. Unknown chrome must not cost real content.
+                try pipeline.beginSession(topCropRatio: 0)
             }
 
             let configuration = SCStreamConfiguration()
@@ -416,16 +417,9 @@ final class ScreenCaptureCoordinator: NSObject {
     }
 
     static func systemTopCropRatio() -> Double {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let scene = scenes.first(where: { $0.windows.contains(where: \.isKeyWindow) }) ?? scenes.first
-        guard let scene else { return 0.075 }
-        let window = scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first
-        let safeTop = window?.safeAreaInsets.top ?? 0
-        let statusTop = scene.statusBarManager?.statusBarFrame.height ?? 0
-        let top = max(safeTop, statusTop)
-        let height = scene.screen.bounds.height
-        guard top > 0, height > 0 else { return 0.075 }
-        return Double(top / height)
+        // Legacy diagnostic callers may have no recorded crop. Do not infer
+        // the captured app's chrome from the recorder's scene or display.
+        0
     }
 
     private nonisolated func friendlyMessage(for error: Error) -> String {
@@ -574,7 +568,22 @@ final class ScreenCaptureHostVisibility: @unchecked Sendable {
     static let shared = ScreenCaptureHostVisibility()
 
     private let lock = NSLock()
-    private var foreground = false
+    // Unknown visibility excludes pixels until a scene or the cold-start
+    // background intent path establishes that the host is not visible.
+    private var foreground = true
+    private var partialWindow = false
+
+    var hasVisiblePartialWindow: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return partialWindow
+    }
+
+    func setPartialWindow(_ value: Bool) {
+        lock.lock()
+        partialWindow = value
+        lock.unlock()
+    }
 
     var isForeground: Bool {
         lock.lock()
@@ -586,6 +595,10 @@ final class ScreenCaptureHostVisibility: @unchecked Sendable {
         lock.lock()
         foreground = value
         lock.unlock()
+    }
+
+    func setSceneActivationState(_ state: UIScene.ActivationState) {
+        setForeground(state == .foregroundActive || state == .foregroundInactive)
     }
 }
 
@@ -715,6 +728,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
     private let preprocessor: FramePreprocessor
     private let hostIsForeground: @Sendable () -> Bool
+    private let hostHasPartialWindow: @Sendable () -> Bool
 
     private var sessionURL: URL?
     private var manifest: CaptureManifest?
@@ -726,8 +740,11 @@ final class ScreenFramePipeline: @unchecked Sendable {
 
     init(preprocessor: FramePreprocessor = FramePreprocessor(), hostIsForeground: @escaping @Sendable () -> Bool = {
         ScreenCaptureHostVisibility.shared.isForeground
+    }, hostHasPartialWindow: @escaping @Sendable () -> Bool = {
+        ScreenCaptureHostVisibility.shared.hasVisiblePartialWindow
     }) {
         self.hostIsForeground = hostIsForeground
+        self.hostHasPartialWindow = hostHasPartialWindow
         self.preprocessor = preprocessor
     }
 
@@ -742,6 +759,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
         manifest?.topCropRatio = topCropRatio
         manifest?.segmentStarts = [0]
         manifest?.captureOptions = options
+        manifest?.geometrySegments = []
         if let manifest { try CaptureStorage.write(manifest, to: session.0) }
         frameIndex = 0
         lastSavedPresentationTime = nil
@@ -767,7 +785,15 @@ final class ScreenFramePipeline: @unchecked Sendable {
 
         // Exclude our actual foreground UI, rather than losing a fixed amount
         // of useful content at the beginning and end of every capture.
-        guard !hostIsForeground() else { diagnostics.reject(.hostForeground); return .none }
+        if hostIsForeground() {
+            diagnostics.reject(.hostForeground)
+            if hostHasPartialWindow() {
+                let message = "当前不支持长卷与目标 App 并排采集。请将目标 App 全屏显示后重新录制；原始画面已保留。"
+                _ = failSession(with: message)
+                return .failed(message)
+            }
+            return .none
+        }
 
         guard let sessionURL else { diagnostics.reject(.notReady); return .none }
         guard CMSampleBufferIsValid(sampleBuffer) else { diagnostics.reject(.invalidBuffer); return .none }
@@ -790,6 +816,19 @@ final class ScreenFramePipeline: @unchecked Sendable {
                 guard let data = image.jpegData(compressionQuality: 0.9) else { diagnostics.reject(.encoding); return .none }
                 let url = CaptureStorage.frameURL(index: frameIndex, sessionURL: sessionURL)
                 try data.write(to: url, options: .atomic)
+                let geometry = CaptureGeometrySegment(startFrame: frameIndex,
+                    pixelWidth: image.cgImage?.width ?? 0, pixelHeight: image.cgImage?.height ?? 0,
+                    videoOrientation: videoOrientation(from: sampleBuffer))
+                if let previous = manifest?.geometrySegments?.last,
+                   previous.pixelWidth != geometry.pixelWidth || previous.pixelHeight != geometry.pixelHeight
+                    || previous.videoOrientation != geometry.videoOrientation {
+                    var starts = manifest?.segmentStarts ?? [0]
+                    if starts.last != frameIndex { starts.append(frameIndex) }
+                    manifest?.segmentStarts = starts
+                    manifest?.geometrySegments?.append(geometry)
+                } else if manifest?.geometrySegments?.isEmpty == true {
+                    manifest?.geometrySegments?.append(geometry)
+                }
                 frameIndex += 1
                 manifest?.frameCount = frameIndex
                 if let manifest {
@@ -910,21 +949,25 @@ final class ScreenFramePipeline: @unchecked Sendable {
         }
 
         var image = CIImage(cvPixelBuffer: pixelBuffer)
-#if !LONGSHOT_SCK_METADATA_STUB
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(
-            sampleBuffer,
-            createIfNecessary: false
-        ) as? [[SCStreamFrameInfo: Any]],
-        let rawOrientation = attachments.first?[.videoOrientation] as? NSNumber,
-        let orientation = CGImagePropertyOrientation(rawValue: rawOrientation.uint32Value) {
+        if let orientation = CGImagePropertyOrientation(rawValue: videoOrientation(from: sampleBuffer)) {
             image = image.oriented(orientation)
         }
-#endif
 
         guard let cgImage = imageContext.createCGImage(image, from: image.extent) else {
             return nil
         }
         return UIImage(cgImage: cgImage)
+    }
+
+    private func videoOrientation(from sampleBuffer: CMSampleBuffer) -> UInt32 {
+#if !LONGSHOT_SCK_METADATA_STUB
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+            as? [[SCStreamFrameInfo: Any]],
+           let orientation = attachments.first?[.videoOrientation] as? NSNumber {
+            return orientation.uint32Value
+        }
+#endif
+        return CGImagePropertyOrientation.up.rawValue
     }
 }
 #else
@@ -961,5 +1004,7 @@ final class ScreenCaptureHostVisibility: @unchecked Sendable {
     var isForeground: Bool { true }
 
     func setForeground(_: Bool) {}
+    func setPartialWindow(_: Bool) {}
+    func setSceneActivationState(_: UIScene.ActivationState) {}
 }
 #endif

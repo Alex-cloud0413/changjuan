@@ -55,6 +55,7 @@ struct CapturePipelineDiagnosticsCheck {
 
     private static func testProductionFilteringAndPTSRegression() throws {
         let visibility = ScreenCaptureHostVisibility()
+        visibility.setSceneActivationState(.background)
         let preprocessor = FramePreprocessor { _, _ in }
         let pipeline = ScreenFramePipeline(preprocessor: preprocessor, hostIsForeground: { visibility.isForeground })
         let session = try pipeline.beginSession(topCropRatio: 0.075)
