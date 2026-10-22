@@ -36,4 +36,9 @@ Captured size/orientation changes produce separate native-size outputs. Target-a
 
 ## Platform state
 
-Version 1.1.4 was created and metadata saved; build selection and submission are pending. A preparation record is not an upload or review submission.
+- Source commit `b856fa64eaebb895f84dde72fbced4bc5621ce4d` was pushed to the independent public repository `Alex-cloud0413/changjuan` main. `git ls-remote` and a second fresh clone confirmed it. All 26 allowlisted files matched byte-for-byte and all 103 source/config/test files matched the regression fingerprint.
+- Xcode confirmed upload success at 2026-10-23 02:42 GMT+8 and reported the package processing. Both targets remain 1.1.4 (47). Upload success is not review submission.
+- Version 1.1.4 was created and Chinese description, promotion, update notes and English review instructions were saved, refreshed and read back equal to the local source. Existing store screenshots were inherited. Automatic release after approval, immediate updates and retention of existing ratings were visually confirmed.
+- Apple processing completed: TestFlight read back version 1.1.4, Build 47 as ready to submit. Build 47 was selected for 1.1.4, saved and read back, then added to the review submission.
+- Formal submission completed on **2026-10-23 at 02:47 GMT+8**. The confirmation said one item submitted; the separate App Review detail page read back **Waiting for Review / 等待审核**, with exactly **1.1.4 (47)**. The screenshot and accessibility receipt remain in local ignored `Build/duo-release-qa/`.
+- Approval and public availability of 1.1.4 remain pending. Version 1.1.3 (46) is the latest version freshly observed as available for distribution; 1.1.4 is configured for automatic release after approval. Submission is not publication. Internal platform identifiers and detailed receipts remain local.

@@ -17,7 +17,7 @@
 <p align="center"><b>简体中文</b> · App 内支持中文 / English 界面切换</p>
 
 > [!NOTE]
-> **App Store Connect 于 2026-10-23 确认 1.1.3（Build 46）可分发；1.1.4（Build 47）正在准备提交。** 本次加入 Duo 布局和采集几何分段，验证范围见 [Build 47 记录](Tests/Validation-1.1.4-build47-release.md)。
+> **App Store Connect 于 2026-10-23 确认 1.1.3（Build 46）可分发；1.1.4（Build 47）已提交，等待审核。** 本次加入 Duo 布局和采集几何分段，验证范围见 [Build 47 记录](Tests/Validation-1.1.4-build47-release.md)。
 
 ---
 
@@ -100,7 +100,8 @@ Config/             xcconfig 与导出配置
 - [x] 录制期间提前分析与本地存储自动清理（1.1.2）
 - [x] 1.1.2（Build 42）公开发布
 - [x] 1.1.3（Build 46）App Store 可分发
-- [ ] 1.1.4（Build 47）App Store 审核
+- [x] 1.1.4（Build 47）提交 App Store 审核（2026-10-23）
+- [ ] 1.1.4（Build 47）审核通过并公开发布
 - [ ] 横持屏幕、极窄表格、大片空白及复杂冻结区域的横向真机验收
 - [ ] 不同外观下共享面板遮挡检测效果的真机确认
 
