@@ -154,8 +154,8 @@ final class ScreenCaptureCoordinator: NSObject {
 
         do {
             let sessionURL = try captureQueue.sync {
-                // The sharing API exposes captured pixels, not another app's
-                // safe area. Unknown chrome must not cost real content.
+                // Zero selects captured-pixel status-bar detection at render
+                // time. Never substitute this app's safe area for the target's.
                 try pipeline.beginSession(topCropRatio: 0)
             }
 

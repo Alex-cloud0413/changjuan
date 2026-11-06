@@ -798,7 +798,7 @@ struct CaptureSettingsView: View {
                         .accessibilityIdentifier("settings.statusBar")
                         .disabled(model.isBusy)
                 } footer: {
-                    Text(language.text("保留实际录制到的时间、信号和电量，也可能包含录制指示。无法确认状态栏边界时保留完整画面，避免裁掉正文。"))
+                    Text(language.text("开启时保留实际录制到的状态栏。关闭时，纵向录制会识别并裁去已确认的顶部状态栏；无法确认边界时保留完整画面，避免裁掉正文。"))
                 }
                 Section {
                     Button(role: .destructive) { confirmingCleanup = true } label: {

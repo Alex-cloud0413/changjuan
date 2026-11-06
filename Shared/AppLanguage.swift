@@ -69,7 +69,7 @@ enum AppLanguage: String, CaseIterable, Sendable {
         "屏幕尺寸或方向变化的内容已分开保存": "Content captured at different sizes or orientations is saved as separate images",
         "屏幕尺寸或方向变化的内容已分开保存，轻点预览": "Different capture sizes or orientations were saved separately. Tap to preview.",
         "保留状态栏": "Keep status bar",
-        "保留实际录制到的时间、信号和电量，也可能包含录制指示。无法确认状态栏边界时保留完整画面，避免裁掉正文。": "Keep the captured time, signal and battery, including any recording indicator. When the status bar boundary is unknown, keep the full frame to avoid cutting out content.",
+        "开启时保留实际录制到的状态栏。关闭时，纵向录制会识别并裁去已确认的顶部状态栏；无法确认边界时保留完整画面，避免裁掉正文。": "When on, keep the captured status bar. When off, vertical captures remove a positively identified top status bar. Unknown boundaries keep the full frame to avoid cutting out content.",
         "长卷": "Long Scroll",
         "查看使用方法": "How to use",
         "使用中文": "Use Chinese",

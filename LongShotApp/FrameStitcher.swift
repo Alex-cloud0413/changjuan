@@ -870,7 +870,8 @@ final class FrameStitcher {
             let segment = try makeSegmentPieces(
                 positioned: positioned, samples: samples,
                 contentTop: options.axis == .horizontal ? CGFloat(motionByIndex[indices[0]]?.frozenLeadingPixels ?? 0) : contentTop,
-                contentBottom: contentBottom, outputTop: outputTop, width: width, height: height
+                contentBottom: contentBottom, outputTop: outputTop, width: width, height: height,
+                detectsStatusBar: topCropRatio == 0
             ).map { piece -> Piece in
                 var result = piece
                 if options.axis == .horizontal { result.segmentID = pageIndex }
@@ -1074,7 +1075,8 @@ final class FrameStitcher {
 
     private func makeSegmentPieces(
         positioned: [PositionedFrame], samples: [FrameSample], contentTop: CGFloat,
-        contentBottom: CGFloat, outputTop: CGFloat, width: CGFloat, height: CGFloat
+        contentBottom: CGFloat, outputTop: CGFloat, width: CGFloat, height: CGFloat,
+        detectsStatusBar: Bool
     ) throws -> [Piece] {
         let contentHeight = Int(contentBottom - contentTop)
         var coverage: [FrameCoverage] = positioned.map { frame in
@@ -1095,8 +1097,18 @@ final class FrameStitcher {
         var cursor = first.start
         var last = first
         if first.start == first.frame.offset, samples[first.frame.index].coveredTop <= outputTop, outputTop < contentTop {
-            pieces.append(Piece(frameURL: samples[first.frame.index].url, sourceRect: CGRect(
-                x: 0, y: outputTop, width: width, height: contentTop - outputTop
+            let source = samples[first.frame.index].url
+            var prefixTop = outputTop
+            // Zero means no externally supplied boundary. Inspect the actual
+            // selected prefix JPEG, not this app's safe area or a long output's
+            // height. Existing positive manifest crops remain unchanged.
+            if detectsStatusBar, options.axis == .vertical, !options.keepsStatusBar,
+               let image = UIImage(contentsOfFile: source.path)?.cgImage,
+               let bottom = CaptureStatusBarDetector.bottom(in: image, maximumBottom: contentTop) {
+                prefixTop = bottom
+            }
+            pieces.append(Piece(frameURL: source, sourceRect: CGRect(
+                x: 0, y: prefixTop, width: width, height: contentTop - prefixTop
             )))
         }
         for item in coverage {
@@ -2045,6 +2057,103 @@ private enum HorizontalScrollMatcher {
         return result
     }
 
+}
+
+/// Captured-pixel evidence for a compact top status bar. This is deliberately
+/// separate from activity occlusion: a normal compact pill is usable input.
+/// Unknown layouts retain their pixels. Never infer another app's safe area.
+enum CaptureStatusBarDetector {
+    static func bottom(in image: CGImage, maximumBottom: CGFloat) -> CGFloat? {
+        let nativeWidth = CGFloat(image.width)
+        guard image.height > image.width * 3 / 2, nativeWidth >= 200,
+              maximumBottom.isFinite, maximumBottom > 0 else { return nil }
+        let band = min(image.height, Int(ceil(nativeWidth * 0.18)))
+        guard let top = image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: band)) else { return nil }
+        let width = 256, height = max(1, Int(ceil(CGFloat(band) * 256 / nativeWidth)))
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.draw(top, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { return nil }
+        func light(_ x: Int, _ y: Int) -> Int {
+            let i = (y * width + x) * 4
+            return max(Int(pixels[i]), Int(pixels[i + 1]), Int(pixels[i + 2]))
+        }
+        var dark = (0..<(width * height)).map { light($0 % width, $0 / width) < 65 }
+        var candidates: [(left: Int, right: Int, low: Int, high: Int)] = []
+        for start in dark.indices where dark[start] {
+            var queue = [start], cursor = 0
+            var left = start % width, right = left, low = start / width, high = low
+            dark[start] = false
+            while cursor < queue.count {
+                let i = queue[cursor]; cursor += 1
+                let x = i % width, y = i / width
+                left = min(left, x); right = max(right, x); low = min(low, y); high = max(high, y)
+                for (xx, yy) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                    where xx >= 0 && xx < width && yy >= 0 && yy < height {
+                    let j = yy * width + xx
+                    if dark[j] { dark[j] = false; queue.append(j) }
+                }
+            }
+            let w = right - left + 1, h = high - low + 1
+            guard w >= 62, w <= 174, h >= 13, h <= 39,
+                  low >= 2, low <= 17, high + 2 < height,
+                  abs((left + right) / 2 - width / 2) <= 20,
+                  w >= h * 3, queue.count * 100 >= w * h * 65 else { continue }
+            let mid = (low + high) / 2
+            // Bounded bright surround and visibly rounded ends. A black page,
+            // flat header, or rectangle is not sufficient cropping evidence.
+            guard light(left - 2, mid) > 100, light(right + 2, mid) > 100,
+                  light((left + right) / 2, low - 2) > 100,
+                  light((left + right) / 2, high + 2) > 100 else { continue }
+            func span(_ y: Int) -> Int {
+                let xs = (left...right).filter { light($0, y) < 65 }
+                return xs.last.map { $0 - xs.first! + 1 } ?? 0
+            }
+            let upper = span(low + 1), lower = span(high - 1)
+            guard span(mid) >= w * 9 / 10,
+                  upper > w / 3, lower > w / 3,
+                  upper < w * 97 / 100, lower < w * 97 / 100 else { continue }
+            candidates.append((left, right, low, high))
+        }
+        guard candidates.count == 1, let capsule = candidates.first else { return nil }
+        // OCR only the left status-clock area, once per selected page prefix.
+        // Native bounds convert Vision's bottom-origin boxes to top pixels.
+        let clockWidth = Int(floor(nativeWidth * 0.27))
+        guard let clockImage = image.cropping(to: CGRect(x: 0, y: 0, width: clockWidth, height: band)) else { return nil }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = false
+        guard (try? VNImageRequestHandler(cgImage: clockImage).perform([request])) != nil else { return nil }
+        let scaleX = nativeWidth / CGFloat(width), scaleY = CGFloat(band) / CGFloat(height)
+        let pillTop = CGFloat(capsule.low) * scaleY
+        let pillBottom = CGFloat(capsule.high + 1) * scaleY
+        let clocks = (request.results ?? []).compactMap { observation -> CGFloat? in
+            guard let text = observation.topCandidates(1).first, text.confidence >= 0.4 else { return nil }
+            let value = text.string.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "：", with: ":")
+            guard value.range(of: #"^\d{1,2}:\d{2}$"#, options: .regularExpression) != nil else { return nil }
+            let parts = value.split(separator: ":").compactMap { Int($0) }
+            guard parts.count == 2, parts[0] < 24, parts[1] < 60 else { return nil }
+            let box = observation.boundingBox
+            let x = box.minX * CGFloat(clockWidth), w = box.width * CGFloat(clockWidth)
+            let y = (1 - box.maxY) * CGFloat(band), h = box.height * CGFloat(band)
+            guard x >= nativeWidth * 0.025, x + w < nativeWidth * 0.27,
+                  w >= nativeWidth * 0.04, w <= nativeWidth * 0.20,
+                  h >= nativeWidth * 0.015, h <= nativeWidth * 0.065,
+                  y + h / 2 >= pillTop, y + h / 2 <= pillBottom else { return nil }
+            return y + h
+        }
+        guard clocks.count == 1, let clockBottom = clocks.first else { return nil }
+        let bottom = ceil(max(pillBottom, clockBottom) + max(2, scaleX))
+        // Never clamp through a capsule that overlaps the matched content.
+        guard bottom <= maximumBottom else { return nil }
+        return bottom
+    }
 }
 
 /// Conservative, local inspection of our black/red expanded activity and the

@@ -106,6 +106,8 @@ try {
     ['Tests/check-capture-pipeline-diagnostics.mjs', simulator]);
   step('duo-preview', 'native-UIKit+injected-system-insets', process.execPath,
     ['Tests/check-duo-preview.mjs', simulator]);
+  step('statusbar-crop', 'native-Vision+UIKit+synthetic-pixel-oracle', process.execPath,
+    ['Tests/check-statusbar-crop.mjs', '--simulator', simulator]);
   const captureLog = step('capture', 'optimized-simulator-behavior', process.execPath,
     ['Tests/check-capture-improvements.mjs', simulator], {
       LONGSHOT_STITCH_BASELINE: join(output, 'baseline-FrameStitcher.swift'),
