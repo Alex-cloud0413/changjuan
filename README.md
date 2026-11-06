@@ -11,13 +11,13 @@
   <img src="https://img.shields.io/badge/platform-iOS%2027%2B-000000?logo=apple&logoColor=white" alt="Platform: iOS 27+">
   <img src="https://img.shields.io/badge/Swift-5.0-F05138?logo=swift&logoColor=white" alt="Swift 5.0">
   <img src="https://img.shields.io/badge/Xcode-27.1-147EFB?logo=xcode&logoColor=white" alt="Xcode 27.1">
-  <img src="https://img.shields.io/badge/version-1.1.4%20(Build%2047)-lightgrey" alt="Version 1.1.4 (Build 47)">
+  <img src="https://img.shields.io/badge/version-1.1.5%20(Build%2048)-lightgrey" alt="Version 1.1.5 (Build 48)">
 </p>
 
 <p align="center"><b>简体中文</b> · App 内支持中文 / English 界面切换</p>
 
 > [!NOTE]
-> **App Store Connect 于 2026-10-23 确认 1.1.3（Build 46）可分发；1.1.4（Build 47）已提交，等待审核。** 本次加入 Duo 布局和采集几何分段，验证范围见 [Build 47 记录](Tests/Validation-1.1.4-build47-release.md)。
+> **当前代码候选：1.1.5（Build 48），用于 Duo 回归修复与连接 iPhone 的原位测试，尚未以此版本提交 App Store。** 本轮范围见 [Build 48 记录](Tests/Validation-1.1.5-build48-device.md)；上一轮提交见 [Build 47 记录](Tests/Validation-1.1.4-build47-release.md)。
 
 ---
 
@@ -40,7 +40,7 @@
 | 📑 **手动跨页接续** | 灵动岛或控制中心「长卷 · 接下一页」暂停 → 切换页面 → 继续，各段按顺序连接并以细分隔带区分。 |
 | ⚡ **录制中提前分析** | 采集时即预处理画面，结束后无固定等待，立即拼接保存。 |
 | 🖼️ **完成即预览** | 保存到照片后浮出可点击缩略图；允许通知时可收到带缩略图的完成提醒。 |
-| 📱 **可选保留状态栏** | 纵向关闭保留时，根据原始像素识别顶部状态栏再裁切；无法确认边界时保留完整画面，避免误裁正文。暂不自动移除侧边状态栏。 |
+| 📱 **可选保留状态栏** | 关闭保留时，纵向与横向录制根据原始像素识别顶部状态栏再裁切；无法确认边界时保留完整画面，避免误裁正文。暂不自动移除侧边状态栏。 |
 | 🧹 **本地存储管理** | 保存成功后自动清理原始帧与分析缓存；设置中可手动「清理所有缓存」。 |
 | 🔒 **纯本地、隐私优先** | 基于 ScreenCaptureKit，所有帧与输出仅写入本机 App Group 容器，不录音频/相机，不上传服务器。 |
 

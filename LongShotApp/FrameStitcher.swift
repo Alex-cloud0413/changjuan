@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import UIKit
 import Vision
 
@@ -53,6 +54,7 @@ struct StitchTimings: Codable {
 final class FrameStitcher {
 #if LONGSHOT_CAPTURE_CHECKS
     nonisolated(unsafe) static var alignmentTrace: ((String) -> Void)?
+    nonisolated(unsafe) static var testBeforeOutputCommit: ((URL) throws -> Void)?
 #endif
     private struct Piece {
         let frameURL: URL?
@@ -412,12 +414,16 @@ final class FrameStitcher {
                   geometrySegments.map(\.startFrame) == geometrySegments.map(\.startFrame).sorted() else {
                 throw StitchError.inconsistentFrameSize
             }
-            for record in geometrySegments {
-                guard starts.contains(record.startFrame) else { throw StitchError.inconsistentFrameSize }
+            for (index, record) in geometrySegments.enumerated() {
+                guard starts.contains(record.startFrame), record.pixelWidth > 0, record.pixelHeight > 0,
+                      (1...8).contains(record.videoOrientation) else { throw StitchError.inconsistentFrameSize }
                 let expected = options.axis == .horizontal
                     ? CGSize(width: record.pixelHeight, height: record.pixelWidth)
                     : CGSize(width: record.pixelWidth, height: record.pixelHeight)
-                guard expected == samples[record.startFrame].imageSize else { throw StitchError.inconsistentFrameSize }
+                let end = index + 1 < geometrySegments.count ? geometrySegments[index + 1].startFrame : samples.count
+                guard end <= samples.count, (record.startFrame..<end).allSatisfy({ samples[$0].imageSize == expected }) else {
+                    throw StitchError.inconsistentFrameSize
+                }
             }
         }
         var groupStarts = [0]
@@ -456,16 +462,17 @@ final class FrameStitcher {
                 segmentStarts: localStarts, started: groupStarted, sampled: groupStarted, preparedFrameCount: 0,
                 allowsStaticPages: true))
         }
-        let outputDirectory = try CaptureStorage.outputsDirectory(in: sessionURL)
-        try removeOldOutputs(from: outputDirectory)
+        let pendingOutputs = staging.appendingPathComponent("complete", isDirectory: true)
+        try files.createDirectory(at: pendingOutputs, withIntermediateDirectories: false)
         var outputs: [URL] = []
         for result in results {
             for source in result.outputURLs {
-                let destination = outputDirectory.appendingPathComponent(String(format: "longshot-%02d.jpg", outputs.count + 1))
+                let destination = pendingOutputs.appendingPathComponent(String(format: "longshot-%02d.jpg", outputs.count + 1))
                 try files.moveItem(at: source, to: destination)
                 outputs.append(destination)
             }
         }
+        outputs = try publishOutputs(from: pendingOutputs, in: sessionURL)
         return StitchResult(outputURLs: outputs,
             acceptedFrameCount: results.reduce(0) { $0 + $1.acceptedFrameCount },
             skippedFrameCount: results.reduce(0) { $0 + $1.skippedFrameCount },
@@ -514,8 +521,28 @@ final class FrameStitcher {
             for range in ranges {
                 let indices = range.filter { !samples[$0].isSystemPanel }
                 var identity: HorizontalIdentityBand?
+                let maximumStatusBand = floor(width * 0.075)
+                var analysisStatusHeight = min(maximumStatusBand, ceil(width * max(0, topCropRatio)))
+                if topCropRatio == 0, let firstIndex = indices.first,
+                   let image = UIImage(contentsOfFile: samples[firstIndex].url.path)?.cgImage,
+                   let anchor = CaptureStatusBarDetector.bottom(in: image, maximumBottom: maximumStatusBand) {
+                    // Prove the clock once; inspect each later capsule's exact
+                    // native extent without OCR. This avoids treating compact
+                    // system animation as moving column identities, while rows
+                    // immediately below the observed band remain moving content.
+                    var observed = anchor
+                    for index in indices.dropFirst() {
+                        let bottom: CGFloat? = autoreleasepool {
+                            guard let image = UIImage(contentsOfFile: samples[index].url.path)?.cgImage else { return nil }
+                            return CaptureStatusBarDetector.capsuleBottom(in: image, maximumBottom: maximumStatusBand)
+                        }
+                        guard let bottom else { observed = 0; break }
+                        observed = max(observed, bottom)
+                    }
+                    analysisStatusHeight = observed
+                }
                 let detected = try HorizontalGridRegistration.detect(indices.map { samples[$0].url },
-                    height: Int(width), statusHeight: Int(min(floor(width * 0.075), ceil(width * max(0, topCropRatio)))),
+                    height: Int(width), statusHeight: Int(analysisStatusHeight),
                     identityBand: &identity)
                 guard let registration = detected else {
                     if let identity {
@@ -896,9 +923,9 @@ final class FrameStitcher {
         guard !pieces.isEmpty else { throw StitchError.noUsableMovement }
 
         let pages = paginate(pieces: pieces, maximumHeight: maximumOutputHeight)
-        let outputDirectory = try CaptureStorage.outputsDirectory(in: sessionURL)
-        try removeOldOutputs(from: outputDirectory)
-
+        let outputDirectory = sessionURL.appendingPathComponent(".render-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outputDirectory) }
         var outputURLs: [URL] = []
         var omittedOccludedBottomRows = false
         let assembled = ProcessInfo.processInfo.systemUptime
@@ -916,6 +943,7 @@ final class FrameStitcher {
             outputURLs.append(outputURL)
         }
 
+        outputURLs = try publishOutputs(from: outputDirectory, in: sessionURL)
         return StitchResult(
             outputURLs: outputURLs,
             acceptedFrameCount: usedFrames.count,
@@ -1302,8 +1330,6 @@ final class FrameStitcher {
     private func renderHorizontal(page: [Piece], originalHeight: CGFloat, topCropRatio: Double,
         plans: [Int: HorizontalSegmentPlan] = [:], bottomCuts: [Int: CGFloat] = [:], to outputURL: URL) throws -> Bool {
         let width = page.reduce(CGFloat(0)) { $0 + $1.sourceRect.height }
-        let statusHeight = min(floor(originalHeight * 0.075), ceil(originalHeight * max(0, topCropRatio)))
-        let headerHeight = options.keepsStatusBar ? statusHeight : 0
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = true
@@ -1316,6 +1342,24 @@ final class FrameStitcher {
             if groups.last?.last?.frameURL == nil { groups.append([]) }
             groups[groups.count - 1].append(piece)
         }
+        let statusHeight: CGFloat
+        if topCropRatio == 0 {
+            // Matching uses transposed samples; chrome evidence must come from
+            // the selected original JPEGs. A common crop is safe only when each
+            // explicit page on this output proves that band independently.
+            let detected = groups.filter { $0.first?.frameURL != nil }.map { group -> CGFloat in
+                guard let url = group.first?.frameURL,
+                      let image = UIImage(contentsOfFile: url.path)?.cgImage else { return 0 }
+                return CaptureStatusBarDetector.bottom(in: image, maximumBottom: floor(originalHeight * 0.075)) ?? 0
+            }
+            let common = detected.first ?? 0
+            // Different proven extents cannot share a crop: the smaller cut
+            // would bisect another page's capsule, and the larger can cut content.
+            statusHeight = common > 0 && detected.allSatisfy { $0 == common } ? common : 0
+        } else {
+            statusHeight = min(floor(originalHeight * 0.075), ceil(originalHeight * max(0, topCropRatio)))
+        }
+        let headerHeight = options.keepsStatusBar ? statusHeight : 0
         let registrations = groups.map { group in
             group.first?.segmentID.flatMap { plans[$0]?.grid }
         }
@@ -1854,15 +1898,33 @@ final class FrameStitcher {
         return (max(statusHeight, top - 2), max(0, bottom - 2))
     }
 
-    private func removeOldOutputs(from directory: URL) throws {
-        let files = try FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )
-        for file in files where ["jpg", "jpeg", "png"].contains(file.pathExtension.lowercased()) {
-            try FileManager.default.removeItem(at: file)
+    /// Publish a complete page set with one filesystem swap. Until this succeeds,
+    /// existing outputs remain readable even if a later render or commit fails.
+    private func publishOutputs(from pending: URL, in sessionURL: URL) throws -> [URL] {
+        let files = FileManager.default
+        let outputDirectory = sessionURL.appendingPathComponent(CaptureConstants.outputsDirectoryName, isDirectory: true)
+        let names = try files.contentsOfDirectory(at: pending, includingPropertiesForKeys: nil)
+            .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }
+            .map(\.lastPathComponent).sorted { $0.compare($1, options: .numeric) == .orderedAscending }
+        guard !names.isEmpty else { throw StitchError.couldNotEncode }
+        let exists = files.fileExists(atPath: outputDirectory.path)
+        if exists {
+            // Previous behavior retained unrelated sidecars in Outputs.
+            for item in try files.contentsOfDirectory(at: outputDirectory, includingPropertiesForKeys: nil)
+                where !["jpg", "jpeg", "png"].contains(item.pathExtension.lowercased()) {
+                try files.copyItem(at: item, to: pending.appendingPathComponent(item.lastPathComponent))
+            }
         }
+#if LONGSHOT_CAPTURE_CHECKS
+        try Self.testBeforeOutputCommit?(pending)
+#endif
+        let result = exists
+            ? renameatx_np(AT_FDCWD, pending.path, AT_FDCWD, outputDirectory.path, UInt32(RENAME_SWAP))
+            : rename(pending.path, outputDirectory.path)
+        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        // With RENAME_SWAP, pending now contains only the previous output set.
+        if exists { try? files.removeItem(at: pending) }
+        return names.map { outputDirectory.appendingPathComponent($0) }
     }
 }
 
@@ -2063,7 +2125,14 @@ private enum HorizontalScrollMatcher {
 /// separate from activity occlusion: a normal compact pill is usable input.
 /// Unknown layouts retain their pixels. Never infer another app's safe area.
 enum CaptureStatusBarDetector {
-    static func bottom(in image: CGImage, maximumBottom: CGFloat) -> CGFloat? {
+    private struct Capsule {
+        let band: Int
+        let top: CGFloat
+        let bottom: CGFloat
+        let padding: CGFloat
+    }
+
+    private static func capsule(in image: CGImage, maximumBottom: CGFloat) -> Capsule? {
         let nativeWidth = CGFloat(image.width)
         guard image.height > image.width * 3 / 2, nativeWidth >= 200,
               maximumBottom.isFinite, maximumBottom > 0 else { return nil }
@@ -2121,6 +2190,24 @@ enum CaptureStatusBarDetector {
             candidates.append((left, right, low, high))
         }
         guard candidates.count == 1, let capsule = candidates.first else { return nil }
+        let scaleY = CGFloat(band) / CGFloat(height)
+        let evidence = Capsule(band: band, top: CGFloat(capsule.low) * scaleY,
+            bottom: CGFloat(capsule.high + 1) * scaleY, padding: max(2, nativeWidth / CGFloat(width)))
+        guard ceil(evidence.bottom + evidence.padding) <= maximumBottom else { return nil }
+        return evidence
+    }
+
+    /// Geometry only, after a page's first native frame has proved its clock.
+    /// Later compact-capsule motion needs no repeated OCR or arbitrary safe area.
+    static func capsuleBottom(in image: CGImage, maximumBottom: CGFloat) -> CGFloat? {
+        guard let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
+        return ceil(evidence.bottom + evidence.padding)
+    }
+
+    static func bottom(in image: CGImage, maximumBottom: CGFloat) -> CGFloat? {
+        let nativeWidth = CGFloat(image.width)
+        guard let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
+        let band = evidence.band
         // OCR only the left status-clock area, once per selected page prefix.
         // Native bounds convert Vision's bottom-origin boxes to top pixels.
         let clockWidth = Int(floor(nativeWidth * 0.27))
@@ -2130,9 +2217,7 @@ enum CaptureStatusBarDetector {
         request.recognitionLanguages = ["en-US"]
         request.usesLanguageCorrection = false
         guard (try? VNImageRequestHandler(cgImage: clockImage).perform([request])) != nil else { return nil }
-        let scaleX = nativeWidth / CGFloat(width), scaleY = CGFloat(band) / CGFloat(height)
-        let pillTop = CGFloat(capsule.low) * scaleY
-        let pillBottom = CGFloat(capsule.high + 1) * scaleY
+        let pillTop = evidence.top, pillBottom = evidence.bottom
         let clocks = (request.results ?? []).compactMap { observation -> CGFloat? in
             guard let text = observation.topCandidates(1).first, text.confidence >= 0.4 else { return nil }
             let value = text.string.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "：", with: ":")
@@ -2149,7 +2234,7 @@ enum CaptureStatusBarDetector {
             return y + h
         }
         guard clocks.count == 1, let clockBottom = clocks.first else { return nil }
-        let bottom = ceil(max(pillBottom, clockBottom) + max(2, scaleX))
+        let bottom = ceil(max(pillBottom, clockBottom) + evidence.padding)
         // Never clamp through a capsule that overlaps the matched content.
         guard bottom <= maximumBottom else { return nil }
         return bottom

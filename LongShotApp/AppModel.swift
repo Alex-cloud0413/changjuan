@@ -147,12 +147,8 @@ final class AppModel: ObservableObject {
     }
 
     private func updateHostVisibility() {
-        switch UIApplication.shared.applicationState {
-        case .active: ScreenCaptureHostVisibility.shared.setForeground(true)
-        case .background: ScreenCaptureHostVisibility.shared.setForeground(false)
-        case .inactive: break // Preserve whether our UI was visible under a system sheet.
-        @unknown default: break
-        }
+        ScreenCaptureHostVisibility.shared.refresh(applicationState: UIApplication.shared.applicationState,
+            sceneStates: UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.activationState })
     }
 #endif
 

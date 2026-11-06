@@ -244,7 +244,7 @@ struct ContentView: View {
                         Text(language.text("已保存到照片"))
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(ScrollPalette.ink)
-                        Text(language.text(model.omittedOccludedBottomRows ? "底部遮挡行未收录，轻点查看" : "轻点预览长图"))
+                        Text(savedThumbnailDescription)
                             .font(.footnote)
                             .foregroundStyle(ScrollPalette.secondaryInk)
                     }
@@ -256,8 +256,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(PressScaleButtonStyle())
-            .accessibilityLabel(language.text(model.omittedOccludedBottomRows
-                ? "底部遮挡行未收录，轻点查看" : "已保存到照片，轻点预览刚刚生成的长图"))
+            .accessibilityLabel(language.text("已保存到照片") + "\n" + savedThumbnailDescription)
 
             Button {
                 model.dismissSavedThumbnail()
@@ -286,6 +285,18 @@ struct ContentView: View {
         }
         .shadow(color: ScrollPalette.ink.opacity(0.12), radius: 18, y: 5)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var savedThumbnailDescription: String {
+        var messages: [String] = []
+        if model.outputsSeparatedByGeometry {
+            messages.append(language.text("屏幕尺寸或方向变化的内容已分开保存"))
+        }
+        if model.omittedOccludedBottomRows {
+            messages.append(language.text("底部遮挡行未收录"))
+        }
+        messages.append(language.text("轻点预览长图"))
+        return messages.joined(separator: "\n")
     }
 
     private var paperBackground: some View {

@@ -1,5 +1,7 @@
 # Portrait status-bar crop regression — 2026-11-06
 
+This records the initial vertical fix. The subsequent comprehensive Duo follow-up and device-test build are recorded in [Build 48 validation](Validation-1.1.5-build48-device.md).
+
 ## Report and cause
 
 The user reported that vertical capture with Keep status bar OFF still included a malformed compact Dynamic Island. GitHub main was read back as `db9c28b05e7bf8ff7581b5a098e94ba3fa46db7e`; its capture coordinator always stores `topCropRatio: 0`. The Duo change removed the own-window safe-area inference to protect target-app content, but supplied no replacement crop path. The existing `CaptureOverlayDetector` intentionally excludes normal compact islands. Thus OFF still appended the entire opening status strip. This is a code regression, not evidence that the preference failed to persist.

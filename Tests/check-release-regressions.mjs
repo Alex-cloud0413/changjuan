@@ -82,7 +82,7 @@ try {
   }
   for (const [name, level] of [
     ['regression-metrics', 'report-behavior'], ['home-icon-only', 'source-contract'],
-    ['capture-settings', 'source-contract'], ['capture-entry', 'source-contract'],
+    ['capture-settings', 'source-contract'], ['home-presentation', 'native-presentation+source-bindings'], ['capture-entry', 'source-contract'],
     ['picker-lifecycle', 'native-with-picker-stubs'], ['capture-overlay', 'native-Vision+OCR-fallback'], ['app-language', 'native+source'],
     ['notification-authorization', 'native-with-system-stubs'], ['storage-cleanup', 'native+source'],
   ]) step(name, level, process.execPath, [`Tests/check-${name}.mjs`]);
@@ -104,6 +104,8 @@ try {
     ['Tests/check-horizontal-floating-controls.mjs', simulator]);
   step('capture-pipeline-diagnostics', 'native-with-SCK-metadata-stubs', process.execPath,
     ['Tests/check-capture-pipeline-diagnostics.mjs', simulator]);
+  step('native-capture-regressions', 'native-capture+SCK-metadata-key-shim', process.execPath,
+    ['Tests/check-native-capture-regressions.mjs', simulator]);
   step('duo-preview', 'native-UIKit+injected-system-insets', process.execPath,
     ['Tests/check-duo-preview.mjs', simulator]);
   step('statusbar-crop', 'native-Vision+UIKit+synthetic-pixel-oracle', process.execPath,

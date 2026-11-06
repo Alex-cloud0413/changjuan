@@ -283,6 +283,7 @@ struct FrameStitcherBoundaryCheck {
         let segmented = try stitch(sources, "geometry-open-close", starts: [0, frames.count, frames.count * 2])
         let expected = first.outputURLs + second.outputURLs + first.outputURLs
         require(segmented.outputURLs.count == expected.count)
+        require(segmented.outputsSeparatedByGeometry && !segmented.omittedOccludedBottomRows)
         for (actual, reference) in zip(segmented.outputURLs, expected) {
             require(try Data(contentsOf: actual) == Data(contentsOf: reference))
         }
@@ -292,7 +293,9 @@ struct FrameStitcherBoundaryCheck {
         let records = [CaptureGeometrySegment(startFrame: 0, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 1),
             CaptureGeometrySegment(startFrame: frames.count, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 3)]
         let turned = try stitch(frames + frames, "geometry-half-turn", starts: [0, frames.count], geometry: records)
-        require(turned.outputURLs.count == first.outputURLs.count * 2)
+        require(turned.outputsSeparatedByGeometry && turned.outputURLs.count == first.outputURLs.count * 2)
+        let sameSizePages = try stitch(frames + frames, "geometry-explicit-same-size", starts: [0, frames.count])
+        require(!sameSizePages.outputsSeparatedByGeometry)
         // A short new segment preserves the actual observed frame at native width.
         let short = try stitch(frames + [narrower[0]], "geometry-short", starts: [0, frames.count])
         require(short.outputURLs.count == first.outputURLs.count + 1)
@@ -308,8 +311,72 @@ struct FrameStitcherBoundaryCheck {
             fatalError("A malformed new segment must not be silently omitted")
         } catch is StitchError {}
         require(try Data(contentsOf: output) == prior)
+        // Metadata is a complete description when present. Do not silently
+        // accept invalid orientation values or a stale record spanning a fold.
+        let valid = CaptureGeometrySegment(startFrame: 0, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 1)
+        let invalidRecords: [[CaptureGeometrySegment]] = [
+            [CaptureGeometrySegment(startFrame: 0, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 0)],
+            [CaptureGeometrySegment(startFrame: 0, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 9)],
+            [CaptureGeometrySegment(startFrame: 0, pixelWidth: 0, pixelHeight: Int(size.height), videoOrientation: 1)],
+            [valid], // Omits the narrower second geometry.
+            [valid, CaptureGeometrySegment(startFrame: -1, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 1)],
+            [valid, CaptureGeometrySegment(startFrame: sources.count, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 1)],
+            [valid, valid]
+        ]
+        for (index, records) in invalidRecords.enumerated() {
+            do {
+                _ = try stitch(sources, "geometry-invalid-record-\(index)", starts: [0, frames.count, frames.count * 2], geometry: records)
+                fatalError("Invalid geometry metadata must fail before replacing output")
+            } catch StitchError.inconsistentFrameSize {}
+        }
+        let upsideDown = CaptureGeometrySegment(startFrame: frames.count, pixelWidth: Int(size.width), pixelHeight: Int(size.height), videoOrientation: 8)
+        let oriented = try stitch(frames + frames, "geometry-orientation-eight", starts: [frames.count], geometry: [valid, upsideDown])
+        require(oriented.outputsSeparatedByGeometry && oriented.outputURLs.count == first.outputURLs.count * 2)
+        try verifyOutputCommitFailure(frames: frames, narrower: narrower, in: directory)
         for (url, bytes) in zip(sources, originalBytes) { require(try Data(contentsOf: url) == bytes) }
         print("Geometry segments passed: fold/unfold native widths, ordered byte-identical outputs, same-size turn, short segment, failed group preserves prior output and all raw bytes")
+    }
+
+    private static func verifyOutputCommitFailure(frames: [URL], narrower: [URL], in directory: URL) throws {
+        let files = FileManager.default
+        for grouped in [false, true] {
+            let session = directory.appendingPathComponent(grouped ? "commit-geometry" : "commit-uniform")
+            let outputDirectory = try CaptureStorage.outputsDirectory(in: session)
+            let prior = Data("previous complete first page".utf8)
+            let secondPrior = Data("previous complete second page".utf8)
+            let sidecar = Data("retained output metadata".utf8)
+            let first = outputDirectory.appendingPathComponent("longshot-01.jpg")
+            let second = outputDirectory.appendingPathComponent("old-page.png")
+            let metadata = outputDirectory.appendingPathComponent("metadata.json")
+            try prior.write(to: first); try secondPrior.write(to: second); try sidecar.write(to: metadata)
+            var reachedCommit = false
+            FrameStitcher.testBeforeOutputCommit = { pending in
+                // Let all geometry groups render completely before making the
+                // real final rename syscall fail by removing its source.
+                guard !grouped || pending.lastPathComponent == "complete" else { return }
+                reachedCommit = true
+                try files.removeItem(at: pending)
+            }
+            defer { FrameStitcher.testBeforeOutputCommit = nil }
+            do {
+                _ = try FrameStitcher().stitch(frameURLs: grouped ? frames + narrower : frames,
+                    sessionURL: session, topCropRatio: 0, segmentStarts: grouped ? [frames.count] : [])
+                fatalError("A failed complete-set commit must not report success")
+            } catch is POSIXError {}
+            FrameStitcher.testBeforeOutputCommit = nil
+            require(reachedCommit)
+            require(try Data(contentsOf: first) == prior)
+            require(try Data(contentsOf: second) == secondPrior)
+            require(try Data(contentsOf: metadata) == sidecar)
+            require(try files.contentsOfDirectory(atPath: session.path).allSatisfy { !$0.hasPrefix(".render-") && !$0.hasPrefix(".geometry-") })
+            let success = try FrameStitcher().stitch(frameURLs: grouped ? frames + narrower : frames,
+                sessionURL: session, topCropRatio: 0, segmentStarts: grouped ? [frames.count] : [])
+            require(success.outputsSeparatedByGeometry == grouped)
+            require(!files.fileExists(atPath: second.path))
+            require(try Data(contentsOf: metadata) == sidecar)
+            require(success.outputURLs.allSatisfy { $0.deletingLastPathComponent() == outputDirectory })
+        }
+        print("Complete output commits passed: native uniform/geometry rendering, forced rename failure preserves both old pages and sidecars, successful swap removes stale pages")
     }
 
     private static func verifyInvalidInputs(_ frames: [URL], in directory: URL) throws {
