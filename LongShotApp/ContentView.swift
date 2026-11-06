@@ -809,7 +809,7 @@ struct CaptureSettingsView: View {
                         .accessibilityIdentifier("settings.statusBar")
                         .disabled(model.isBusy)
                 } footer: {
-                    Text(language.text("开启时保留实际录制到的状态栏。关闭时，纵向录制会识别并裁去已确认的顶部状态栏；无法确认边界时保留完整画面，避免裁掉正文。"))
+                    Text(language.text("开启时保留时间、电量，并对已识别的灵动岛和录制圆点做本地背景修补；照片背景可能有修补痕迹。关闭时裁去已确认的顶部状态栏。无法确认时保留原图，避免误改内容。"))
                 }
                 Section {
                     Button(role: .destructive) { confirmingCleanup = true } label: {

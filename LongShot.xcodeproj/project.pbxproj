@@ -373,7 +373,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C00000000000000000000013 /* App.xcconfig */;
 			buildSettings = {
-				CURRENT_PROJECT_VERSION = 49;
+				CURRENT_PROJECT_VERSION = 50;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 1.1.5;
@@ -387,7 +387,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C00000000000000000000013 /* App.xcconfig */;
 			buildSettings = {
-				CURRENT_PROJECT_VERSION = 49;
+				CURRENT_PROJECT_VERSION = 50;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 1.1.5;
@@ -402,7 +402,7 @@
 			baseConfigurationReference = C0000000000000000000002B /* Widgets.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CURRENT_PROJECT_VERSION = 49;
+				CURRENT_PROJECT_VERSION = 50;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
 				MARKETING_VERSION = 1.1.5;
@@ -418,7 +418,7 @@
 			baseConfigurationReference = C0000000000000000000002B /* Widgets.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CURRENT_PROJECT_VERSION = 49;
+				CURRENT_PROJECT_VERSION = 50;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
 				MARKETING_VERSION = 1.1.5;
