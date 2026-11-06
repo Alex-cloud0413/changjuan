@@ -2152,49 +2152,120 @@ enum CaptureStatusBarDetector {
             let i = (y * width + x) * 4
             return max(Int(pixels[i]), Int(pixels[i + 1]), Int(pixels[i + 2]))
         }
-        var dark = (0..<(width * height)).map { light($0 % width, $0 / width) < 65 }
-        var candidates: [(left: Int, right: Int, low: Int, high: Int)] = []
-        for start in dark.indices where dark[start] {
-            var queue = [start], cursor = 0
-            var left = start % width, right = left, low = start / width, high = low
-            dark[start] = false
-            while cursor < queue.count {
-                let i = queue[cursor]; cursor += 1
-                let x = i % width, y = i / width
-                left = min(left, x); right = max(right, x); low = min(low, y); high = max(high, y)
-                for (xx, yy) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
-                    where xx >= 0 && xx < width && yy >= 0 && yy < height {
-                    let j = yy * width + xx
-                    if dark[j] { dark[j] = false; queue.append(j) }
+        struct Blob {
+            var left: Int; var right: Int; var low: Int; var high: Int; var count: Int
+            var w: Int { right - left + 1 }; var h: Int { high - low + 1 }
+        }
+        func components(_ mask: [Bool]) -> [Blob] {
+            var mask = mask, result: [Blob] = []
+            for start in mask.indices where mask[start] {
+                var queue = [start], cursor = 0
+                var box = Blob(left: start % width, right: start % width,
+                               low: start / width, high: start / width, count: 0)
+                mask[start] = false
+                while cursor < queue.count {
+                    let i = queue[cursor]; cursor += 1
+                    let x = i % width, y = i / width
+                    box.left = min(box.left, x); box.right = max(box.right, x)
+                    box.low = min(box.low, y); box.high = max(box.high, y)
+                    for (xx, yy) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                        where xx >= 0 && xx < width && yy >= 0 && yy < height {
+                        let j = yy * width + xx
+                        if mask[j] { mask[j] = false; queue.append(j) }
+                    }
                 }
+                box.count = queue.count
+                if box.count >= 5 { result.append(box) }
             }
-            let w = right - left + 1, h = high - low + 1
-            guard w >= 62, w <= 174, h >= 13, h <= 39,
-                  low >= 2, low <= 17, high + 2 < height,
-                  abs((left + right) / 2 - width / 2) <= 20,
-                  w >= h * 3, queue.count * 100 >= w * h * 65 else { continue }
-            let mid = (low + high) / 2
-            // Bounded bright surround and visibly rounded ends. A black page,
-            // flat header, or rectangle is not sufficient cropping evidence.
-            guard light(left - 2, mid) > 100, light(right + 2, mid) > 100,
-                  light((left + right) / 2, low - 2) > 100,
-                  light((left + right) / 2, high + 2) > 100 else { continue }
+            return result
+        }
+        let marks = components((0..<(width * height)).map { index in
+            let i = index * 4
+            let r = Int(pixels[i]), g = Int(pixels[i + 1]), b = Int(pixels[i + 2])
+            return r > 60 && Double(r) > Double(g) * 1.5 && Double(r) > Double(b) * 1.5 && g < 100 && b < 100
+        })
+        func recordingMark(in box: Blob, darkCenter: Bool, alignedWith main: Blob? = nil) -> Bool {
+            marks.contains { mark in
+                let x = (mark.left + mark.right) / 2, y = (mark.low + mark.high) / 2
+                let referenceHeight = main?.h ?? box.h
+                guard mark.w >= 3, mark.h >= 3, mark.w <= referenceHeight * 2 / 3, mark.h <= referenceHeight * 2 / 3,
+                      mark.w * 2 >= mark.h, mark.h * 2 >= mark.w,
+                      mark.left > box.left, mark.right < box.right,
+                      mark.low > box.low, mark.high < box.high else { return false }
+                if let main {
+                    guard x > main.right, x - main.right <= main.h * 2,
+                          y >= main.low - main.h / 3, y <= main.high + main.h / 3 else { return false }
+                } else {
+                    guard y >= box.low + box.h / 5, y <= box.high - box.h / 5 else { return false }
+                }
+                if darkCenter {
+                    guard x < box.left + box.w / 3 || x > box.right - box.w / 3 else { return false }
+                    let center = (-1...1).flatMap { yy in (-1...1).map { xx in light(x + xx, y + yy) } }
+                    return center.reduce(0, +) / center.count < 40
+                }
+                return true
+            }
+        }
+        func hasSurround(_ box: Blob, photographic: Bool, threshold: Int) -> Bool {
+            guard box.left >= 2, box.right + 2 < width, box.low >= 2, box.high + 2 < height else { return false }
+            let midX = (box.left + box.right) / 2, midY = (box.low + box.high) / 2
+            let outside = [light(box.left - 2, midY), light(box.right + 2, midY),
+                           light(midX, box.low - 2), light(midX, box.high + 2)]
+            if !photographic { return outside.allSatisfy { $0 > 100 } }
+            let interior = (box.low...box.high).flatMap { y in (box.left...box.right).compactMap { x -> Int? in
+                let value = light(x, y); return value < threshold ? value : nil
+            } }
+            guard !interior.isEmpty else { return false }
+            let black = interior.reduce(0, +) / interior.count
+            return outside.allSatisfy { $0 - black >= 24 }
+        }
+        func rounded(_ box: Blob, threshold: Int) -> Bool {
             func span(_ y: Int) -> Int {
-                let xs = (left...right).filter { light($0, y) < 65 }
+                let xs = (box.left...box.right).filter { light($0, y) < threshold }
                 return xs.last.map { $0 - xs.first! + 1 } ?? 0
             }
-            let upper = span(low + 1), lower = span(high - 1)
-            guard span(mid) >= w * 9 / 10,
-                  upper > w / 3, lower > w / 3,
-                  upper < w * 97 / 100, lower < w * 97 / 100 else { continue }
-            candidates.append((left, right, low, high))
+            let upper = span(box.low + 1), lower = span(box.high - 1)
+            return span((box.low + box.high) / 2) >= box.w * 9 / 10
+                && upper > box.w / 3 && lower > box.w / 3
+                && upper < box.w * 97 / 100 && lower < box.w * 97 / 100
         }
-        guard candidates.count == 1, let capsule = candidates.first else { return nil }
-        let scaleY = CGFloat(band) / CGFloat(height)
-        let evidence = Capsule(band: band, top: CGFloat(capsule.low) * scaleY,
-            bottom: CGFloat(capsule.high + 1) * scaleY, padding: max(2, nativeWidth / CGFloat(width)))
-        guard ceil(evidence.bottom + evidence.padding) <= maximumBottom else { return nil }
-        return evidence
+        func detect(threshold: Int, photographic: Bool) -> Capsule? {
+            let blobs = components((0..<(width * height)).map { light($0 % width, $0 / width) < threshold })
+            let candidates = blobs.filter { box in
+                box.w >= 62 && box.w <= 174 && box.h >= 13 && box.h <= 39
+                    && box.low >= 2 && box.low <= 17 && box.high + 2 < height
+                    && abs((box.left + box.right) / 2 - width / 2) <= 20
+                    && box.w >= box.h * 3 && box.count * 100 >= box.w * box.h * 65
+                    && hasSurround(box, photographic: photographic, threshold: threshold)
+                    && rounded(box, threshold: threshold)
+                    && (!photographic || recordingMark(in: box, darkCenter: true))
+            }
+            guard candidates.count == 1, let main = candidates.first else { return nil }
+            // A separate recording circle may sit lower than the main island.
+            // Include its entire proved contour, or retain the whole prefix.
+            let bubbles = blobs.filter { box in
+                box.left > main.right && box.left - main.right <= main.h
+                    && recordingMark(in: box, darkCenter: false, alignedWith: main)
+            }
+            // A plausible recording endcap with an uncertain outline cannot
+            // be ignored: cropping only the main capsule would cut through it.
+            guard bubbles.count <= 1, bubbles.allSatisfy({
+                $0.h >= 13 && $0.h <= 39 && $0.w * 4 >= $0.h * 3 && $0.w * 3 <= $0.h * 4
+                    && abs(($0.low + $0.high) - (main.low + main.high)) <= main.h
+                    && $0.count * 100 >= $0.w * $0.h * 50
+                    && hasSurround($0, photographic: photographic, threshold: threshold) && rounded($0, threshold: threshold)
+            }) else { return nil }
+            let bottom = max(main.high, bubbles.first?.high ?? main.high)
+            let scaleY = CGFloat(band) / CGFloat(height)
+            let evidence = Capsule(band: band, top: CGFloat(main.low) * scaleY,
+                bottom: CGFloat(bottom + 1) * scaleY, padding: max(2, nativeWidth / CGFloat(width)))
+            guard ceil(evidence.bottom + evidence.padding) <= maximumBottom else { return nil }
+            return evidence
+        }
+        // Preserve the original neutral-background route. Photography requires
+        // stricter black geometry plus recording-ring evidence and local contrast;
+        // the same native clock proof below still applies before output cropping.
+        return detect(threshold: 65, photographic: false) ?? detect(threshold: 24, photographic: true)
     }
 
     /// Geometry only, after a page's first native frame has proved its clock.

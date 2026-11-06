@@ -28,7 +28,7 @@ struct StatusBarCropCheck {
             require(flag + 1 < CommandLine.arguments.count, "--fixture needs a local image path")
             try checkPrivateFixture(URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
         }
-        print("Status bar native checks passed (\(checks) assertions): real Vision, compact/tall captures and conservative negatives.")
+        print("Status bar native checks passed (\(checks) assertions): real Vision, compact/split recording indicators, patterned/tall captures and conservative negatives.")
     }
 
     private static func require(_ value: Bool, _ message: String, line: UInt = #line) {
@@ -36,13 +36,15 @@ struct StatusBarCropCheck {
         if !value { fatalError("\(message) (line \(line))") }
     }
 
-    private enum Shape { case capsule, rectangle, absent }
+    private enum Shape { case capsule, recordingCapsule, splitRecording, spurredRecordingBubble, rectangle, circle, absent }
+    private enum HeaderBackground { case plain, textured, photographic, unboundedShadow }
 
     /// All coordinates are native pixels measured from the top-left.
     private static func makeHeader(width: Int = 1206, height: Int = 2622,
                                    clockTop: CGFloat? = 72, capsuleTop: CGFloat = 42,
                                    shape: Shape = .capsule,
-                                   dark: Bool = false, scale: CGFloat = 1) throws -> CGImage {
+                                   dark: Bool = false, scale: CGFloat = 1,
+                                   background: HeaderBackground = .plain) throws -> CGImage {
         guard let context = CGContext(data: nil, width: width, height: height,
             bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw CheckError.image }
@@ -50,26 +52,104 @@ struct StatusBarCropCheck {
         context.scaleBy(x: 1, y: -1)
         context.setFillColor(CGColor(gray: dark ? 0 : 1, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        if background != .plain {
+            try drawPatternedHeader(in: context, width: width, height: height, scale: scale, background: background)
+        }
         if shape != .absent {
             let rect = CGRect(x: CGFloat(width) / 2 - 176 * scale, y: capsuleTop,
                               width: 352 * scale, height: 108 * scale)
             context.setFillColor(CGColor(gray: 0, alpha: 1))
-            if shape == .capsule {
+            if shape == .circle {
+                context.fillEllipse(in: CGRect(x: CGFloat(width) / 2 - 54 * scale,
+                    y: capsuleTop, width: 108 * scale, height: 108 * scale))
+            } else if shape != .rectangle {
                 context.addPath(CGPath(roundedRect: rect, cornerWidth: 54 * scale,
                                        cornerHeight: 54 * scale, transform: nil))
                 context.fillPath()
             } else {
                 context.fill(rect)
             }
+            if shape == .recordingCapsule || shape == .splitRecording || shape == .spurredRecordingBubble {
+                let ring = CGRect(x: rect.maxX - 74 * scale, y: capsuleTop + 34 * scale,
+                    width: 40 * scale, height: 40 * scale)
+                context.setFillColor(CGColor(red: 0.98, green: 0.13, blue: 0.19, alpha: 1))
+                context.fillEllipse(in: ring)
+                context.setFillColor(CGColor(gray: 0, alpha: 1))
+                context.fillEllipse(in: ring.insetBy(dx: 11 * scale, dy: 11 * scale))
+            }
+            if shape == .splitRecording || shape == .spurredRecordingBubble {
+                // A separate recording bubble can extend below the main island.
+                // Its complete native lower edge is 164 px at 1206 px width.
+                let bubble = CGRect(x: rect.maxX + 24 * scale, y: capsuleTop + 14 * scale,
+                    width: 108 * scale, height: 108 * scale)
+                context.setFillColor(CGColor(gray: 0, alpha: 1))
+                context.fillEllipse(in: bubble)
+                let ring = bubble.insetBy(dx: 33 * scale, dy: 33 * scale)
+                context.setFillColor(CGColor(red: 0.98, green: 0.13, blue: 0.19, alpha: 1))
+                context.fillEllipse(in: ring)
+                context.setFillColor(CGColor(gray: 0, alpha: 1))
+                context.fillEllipse(in: ring.insetBy(dx: 10 * scale, dy: 10 * scale))
+                context.setFillColor(CGColor(red: 0.98, green: 0.13, blue: 0.19, alpha: 1))
+                context.fillEllipse(in: ring.insetBy(dx: 16 * scale, dy: 16 * scale))
+                if shape == .spurredRecordingBubble {
+                    // This near-black photographic feature joins the red-marked
+                    // bubble and reaches the inspection edge. Main-only cropping
+                    // would leave uncertain status pixels in the retained result.
+                    context.setFillColor(CGColor(gray: 0.015, alpha: 1))
+                    context.fill(CGRect(x: CGFloat(width) / 2 + 237 * scale,
+                        y: capsuleTop + 108 * scale, width: 45 * scale, height: 68 * scale))
+                }
+            }
         }
         if let clockTop {
             drawText("09:41", at: CGPoint(x: 78 * scale, y: clockTop), size: 52 * scale,
-                     color: CGColor(gray: dark ? 1 : 0, alpha: 1), in: context)
+                     color: CGColor(gray: dark || background != .plain ? 1 : 0, alpha: 1), in: context)
         }
         drawText("Weixin", at: CGPoint(x: CGFloat(width) / 2 - 75 * scale, y: 209 * scale),
-                 size: 42 * scale, color: CGColor(gray: dark ? 1 : 0, alpha: 1), in: context)
+                 size: 42 * scale, color: CGColor(gray: dark || background != .plain ? 1 : 0, alpha: 1), in: context)
         guard let image = context.makeImage() else { throw CheckError.image }
         return image
+    }
+
+    /// Procedural photo-like lighting and texture, with no private image pixels.
+    /// Dim pixels connect to black at the old threshold of 65, while remaining
+    /// distinct from the near-black system indicators. The clock is white.
+    private static func drawPatternedHeader(in context: CGContext, width: Int, height: Int,
+                                            scale: CGFloat, background: HeaderBackground) throws {
+        let rows = min(height, Int(ceil(420 * scale)))
+        var bytes = [UInt8](repeating: 255, count: width * rows * 4)
+        for y in 0..<rows {
+            for x in 0..<width {
+                let xx = Double(x) / Double(scale), yy = Double(y) / Double(scale)
+                let grain = Double((x &* 73 &+ y &* 137 &+ (x &* y) % 29) % 11) - 5
+                let value: Double
+                if background == .unboundedShadow {
+                    value = 8 + 3 * sin(xx / 23) + 2 * cos(yy / 17) + grain * 0.2
+                } else if background == .textured {
+                    value = 47 + 7 * sin(xx / 23) + 5 * cos(yy / 17) + grain * 0.5
+                } else {
+                    let dx = (xx - 627) / 434, dy = (yy - 100) / 210
+                    let shadow = exp(-(dx * dx + dy * dy))
+                    value = max(35, 140 - 98 * shadow + 9 * sin(xx / 67 + yy / 41) + grain)
+                }
+                let i = (y * width + x) * 4
+                bytes[i] = UInt8(min(255, max(0, Int(value + 7))))
+                bytes[i + 1] = UInt8(min(255, max(0, Int(value))))
+                bytes[i + 2] = UInt8(min(255, max(0, Int(value - 6))))
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let image = CGImage(width: width, height: rows, bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else {
+            throw CheckError.image
+        }
+        context.saveGState()
+        context.translateBy(x: 0, y: CGFloat(rows))
+        context.scaleBy(x: 1, y: -1)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: rows))
+        context.restoreGState()
     }
 
     private static func drawText(_ value: String, at point: CGPoint, size: CGFloat,
@@ -109,6 +189,37 @@ struct StatusBarCropCheck {
         let smallBottom = CaptureStatusBarDetector.bottom(in: small, maximumBottom: floor(2185 * 0.075))
         require(smallBottom != nil && smallBottom! >= 125 && smallBottom! <= 145,
                 "Pixel evidence follows native width for a smaller portrait capture")
+        for background in [HeaderBackground.textured, .photographic] {
+            for shape in [Shape.recordingCapsule, .splitRecording] {
+                let patterned = try makeHeader(shape: shape, background: background)
+                let clock = patterned.cropping(to: CGRect(x: 0, y: 0, width: 325, height: 218))!
+                try VNImageRequestHandler(cgImage: clock).perform([probe])
+                let text = (probe.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+                require(text.contains("09:41") || text.contains("9:41"),
+                        "Native Vision must recognize the white clock over \(background): \(text)")
+                let lowerEdge: CGFloat = shape == .splitRecording ? 164 : 150
+                let detected = CaptureStatusBarDetector.bottom(in: patterned, maximumBottom: 196)
+                require(detected != nil && detected! >= lowerEdge && detected! < 178,
+                        "The complete \(shape) status band is removed over \(background): \(String(describing: detected))")
+                require(CaptureStatusBarDetector.capsuleBottom(in: patterned, maximumBottom: 196) == detected,
+                        "Clock and geometry paths agree on the whole patterned status band")
+                require(CaptureStatusBarDetector.bottom(in: patterned, maximumBottom: lowerEdge - 4) == nil,
+                        "A content bound through the \(shape) lower edge preserves the whole source")
+                require(detected! < 209, "The navigation title below the patterned status band is retained")
+            }
+        }
+        let splitTall = try makeHeader(height: 7273, shape: .splitRecording, background: .photographic)
+        let splitTallBottom = CaptureStatusBarDetector.bottom(in: splitTall, maximumBottom: floor(7273 * 0.075))
+        require(splitTallBottom != nil && splitTallBottom! >= 164 && splitTallBottom! < 178,
+                "Photographic tall results remove the captured split status band without using result height")
+        let splitSmall = try makeHeader(width: 1005, height: 2185, clockTop: 60, capsuleTop: 35,
+            shape: .splitRecording, scale: 5.0 / 6.0, background: .photographic)
+        let splitSmallBottom = CaptureStatusBarDetector.bottom(in: splitSmall, maximumBottom: floor(2185 * 0.075))
+        require(splitSmallBottom != nil && splitSmallBottom! >= 164 * 5.0 / 6.0 && splitSmallBottom! < 150,
+                "A smaller native photographic header includes the complete separate recording bubble")
+        let uncertainBubble = try makeHeader(shape: .spurredRecordingBubble, background: .photographic)
+        require(CaptureStatusBarDetector.capsuleBottom(in: uncertainBubble, maximumBottom: 196) == nil,
+                "A red-marked bubble joined to a near-black photo spur cannot fall back to the main island's lower edge")
         let negatives: [(String, CGImage)] = [
             ("low clock", try makeHeader(clockTop: 510)),
             ("bottom clock", try makeHeader(clockTop: 2440)),
@@ -116,7 +227,17 @@ struct StatusBarCropCheck {
             ("clock without pill", try makeHeader(shape: .absent)),
             ("rectangular app banner", try makeHeader(shape: .rectangle)),
             ("full dark screenshot", try makeHeader(dark: true)),
-            ("landscape content", try makeHeader(width: 2622, height: 1206))
+            ("landscape content", try makeHeader(width: 2622, height: 1206)),
+            ("photo and white clock without island", try makeHeader(shape: .absent, background: .photographic)),
+            ("textured white clock without island", try makeHeader(shape: .absent, background: .textured)),
+            ("photo black rectangle and white clock", try makeHeader(shape: .rectangle, background: .photographic)),
+            ("photo content circle and white clock", try makeHeader(shape: .circle, background: .photographic)),
+            ("photo capsule without recording ring", try makeHeader(background: .photographic)),
+            ("textured capsule without recording ring", try makeHeader(background: .textured)),
+            ("unbounded near-black photographic shadow", try makeHeader(shape: .splitRecording, background: .unboundedShadow)),
+            ("photo spur connected to red-marked recording bubble", uncertainBubble),
+            ("photo recording indicators without clock", try makeHeader(clockTop: nil, shape: .splitRecording, background: .photographic)),
+            ("photo recording indicators with low clock", try makeHeader(clockTop: 510, shape: .splitRecording, background: .photographic))
         ]
         for (name, image) in negatives {
             require(CaptureStatusBarDetector.bottom(in: image, maximumBottom: floor(CGFloat(image.height) * 0.075)) == nil,
@@ -128,13 +249,31 @@ struct StatusBarCropCheck {
         let original = try Data(contentsOf: url, options: .mappedIfSafe)
         guard let source = CGImageSourceCreateWithData(original as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw CheckError.image }
-        require(image.width == 1206 && image.height == 6051,
-                "Expected the authorized 1206×6051 private result, got \(image.width)×\(image.height)")
+        require(image.width >= 200 && image.height > image.width * 3 / 2,
+                "Expected an authorized native portrait result, got \(image.width)×\(image.height)")
+        let scale = CGFloat(image.width) / 1206
         let bottom = CaptureStatusBarDetector.bottom(in: image, maximumBottom: floor(CGFloat(image.height) * 0.075))
-        require(bottom != nil && bottom! >= 160 && bottom! <= 200,
+        require(bottom != nil && bottom! >= 130 * scale && bottom! <= 200 * scale,
                 "Authorized result must remove the complete island before the Weixin title: \(String(describing: bottom))")
+        // Match the capture writer's JPEG quality without creating a private file.
+        guard let captureJPEG = CFDataCreateMutable(kCFAllocatorDefault, 0),
+              let destination = CGImageDestinationCreateWithData(captureJPEG, "public.jpeg" as CFString, 1, nil) else {
+            throw CheckError.image
+        }
+        CGImageDestinationAddImage(destination, image,
+            [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+        require(CGImageDestinationFinalize(destination), "Private in-memory capture-quality JPEG encoding succeeds")
+        guard let captureSource = CGImageSourceCreateWithData(captureJPEG, nil),
+              let captureImage = CGImageSourceCreateImageAtIndex(captureSource, 0, nil) else { throw CheckError.image }
+        require(captureImage.width == image.width && captureImage.height == image.height,
+                "In-memory JPEG 0.9 preserves the private native dimensions")
+        let captureBottom = CaptureStatusBarDetector.bottom(in: captureImage,
+            maximumBottom: floor(CGFloat(captureImage.height) * 0.075))
+        require(captureBottom != nil && captureBottom! >= 130 * scale && captureBottom! <= 200 * scale
+                && abs(captureBottom! - bottom!) <= 6,
+                "Capture-quality JPEG must preserve the complete private status boundary within six native pixels: \(String(describing: captureBottom))")
         require(try Data(contentsOf: url) == original, "Private image bytes remain unchanged")
-        print("Private fixture inspected in place: 1206×6051; detected bottom=\(bottom!); no image copied or emitted.")
+        print("Private fixture inspected in place: \(image.width)×\(image.height); detected bottom=\(bottom!), in-memory JPEG 0.9 bottom=\(captureBottom!); no image saved or emitted.")
     }
 
 #if canImport(UIKit)
@@ -217,11 +356,49 @@ struct StatusBarCropCheck {
             require(a.width == raw.width && b.width == raw.width && a.height - b.height == Int(detected!),
                     "Geometry page \(index) crops only its own proved status pixels")
         }
+        try checkPatternedIntegration(in: root.appendingPathComponent("patterned"))
         try checkHorizontalIntegration(in: root.appendingPathComponent("horizontal"))
         for (url, data) in originals {
             require(try Data(contentsOf: url) == data, "Every original JPEG remains byte-for-byte unchanged")
         }
-        print("Status-bar UIKit integration passed (\(checks) assertions): OFF/ON, title pixels, unknown source, legacy ratio, reverse, cache, explicit/static pages and geometry groups. Generated fixtures: \(root.path)")
+        print("Status-bar UIKit integration passed (\(checks) assertions): OFF/ON, patterned split recording headers, native title/body pixels, unknown source, legacy ratio, reverse, cache, explicit/static pages and geometry groups. Generated fixtures: \(root.path)")
+    }
+
+    private static func checkPatternedIntegration(in root: URL) throws {
+        for background in [HeaderBackground.textured, .photographic] {
+            let directory = root.appendingPathComponent(String(describing: background))
+            let frames = try makeScrollFrames(in: directory.appendingPathComponent("frames"), status: true,
+                count: 2, background: background, indicator: .splitRecording, jpegQuality: 0.9)
+            let originals = try frames.map { ($0, try Data(contentsOf: $0)) }
+            let source = try readImage(frames[0])
+            let detected = CaptureStatusBarDetector.bottom(in: source, maximumBottom: 196)
+            require(detected != nil && detected! >= 164 && detected! < 178,
+                    "JPEG \(background) source proves the complete split recording band")
+            let cut = Int(detected!)
+            let off = try FrameStitcher(options: CaptureOptions(keepsStatusBar: false)).stitch(
+                frameURLs: frames, sessionURL: directory.appendingPathComponent("off"), topCropRatio: 0)
+            let on = try FrameStitcher(options: CaptureOptions(keepsStatusBar: true)).stitch(
+                frameURLs: frames, sessionURL: directory.appendingPathComponent("on"), topCropRatio: 0)
+            require(off.outputURLs.count == 1 && on.outputURLs.count == 1,
+                    "A patterned scrolling page produces one complete native result")
+            let cropped = try readImage(off.outputURLs[0]), kept = try readImage(on.outputURLs[0])
+            require(cropped.width == source.width && kept.width == source.width
+                    && kept.height == source.height + 137 && kept.height - cropped.height == cut,
+                    "Patterned OFF/ON retain every native body row and differ by only the proved band")
+            require(nativePixelError(source, rect: CGRect(x: 0, y: cut, width: source.width, height: 360),
+                                     cropped, rect: CGRect(x: 0, y: 0, width: source.width, height: 360)) < 5,
+                    "Patterned OFF retains exact native navigation, title and first body pixels below the entire band")
+            require(nativePixelError(source, rect: CGRect(x: 0, y: 0, width: source.width, height: 360),
+                                     kept, rect: CGRect(x: 0, y: 0, width: source.width, height: 360)) < 5,
+                    "Patterned ON retains the authentic photographic status header and title at native resolution")
+            let last = try readImage(frames[1])
+            require(nativePixelError(last, rect: CGRect(x: 0, y: 440, width: last.width, height: 96),
+                                     cropped, rect: CGRect(x: 0, y: 440 + 137 - cut, width: last.width, height: 96)) < 5,
+                    "Patterned OFF retains newly observed scrolling body pixels at their native coordinates")
+            for (url, bytes) in originals {
+                require(try Data(contentsOf: url) == bytes, "Patterned source JPEG bytes remain unchanged")
+            }
+        }
     }
 
     private static func checkMovingStatusProbe() throws {
@@ -358,7 +535,10 @@ struct StatusBarCropCheck {
     }
 
     private static func makeScrollFrames(in directory: URL, status: Bool, width: Int = 1206,
-                                         height: Int = 2622, count: Int = 6, axis: CaptureAxis = .vertical, headerOffset: Int = 0, headerMovement: Int = 0, earlyMovingRow: Bool = false) throws -> [URL] {
+                                         height: Int = 2622, count: Int = 6, axis: CaptureAxis = .vertical,
+                                         headerOffset: Int = 0, headerMovement: Int = 0, earlyMovingRow: Bool = false,
+                                         background: HeaderBackground = .plain, indicator: Shape = .capsule,
+                                         jpegQuality: CGFloat = 0.94) throws -> [URL] {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1; format.opaque = true; format.preferredRange = .standard
@@ -388,7 +568,7 @@ struct StatusBarCropCheck {
             let header = try makeHeader(width: width, height: height,
                 clockTop: status ? CGFloat(72 + temporalOffset) * scale : nil,
                 capsuleTop: CGFloat(42 + temporalOffset) * scale,
-                shape: status ? .capsule : .absent, scale: scale)
+                shape: status ? indicator : .absent, scale: scale, background: background)
             let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { context in
                 UIImage(cgImage: header).draw(at: .zero)
                 context.cgContext.saveGState()
@@ -412,7 +592,7 @@ struct StatusBarCropCheck {
                 context.fill(CGRect(x: 0, y: 178 * scale, width: CGFloat(width), height: 12 * scale))
             }
             let url = CaptureStorage.frameURL(index: index, sessionURL: directory)
-            guard let data = image.jpegData(compressionQuality: 0.94) else { throw CheckError.image }
+            guard let data = image.jpegData(compressionQuality: jpegQuality) else { throw CheckError.image }
             try data.write(to: url)
             return url
         }
@@ -441,6 +621,32 @@ struct StatusBarCropCheck {
         let left = pixels(first, a), right = pixels(second, b)
         guard left.count == right.count, !left.isEmpty else { return .infinity }
         return zip(left, right).map { Double(abs(Int($0) - Int($1))) }.reduce(0, +) / Double(left.count)
+    }
+
+    /// No resizing: a missing row or a shifted title must remain visible to the oracle.
+    private static func nativePixelError(_ first: CGImage, rect a: CGRect, _ second: CGImage, rect b: CGRect) -> Double {
+        guard a.width == b.width, a.height == b.height, a.width > 0, a.height > 0 else { return .infinity }
+        func pixels(_ image: CGImage, _ rect: CGRect) -> [UInt8] {
+            guard let crop = image.cropping(to: rect), crop.width == Int(rect.width),
+                  crop.height == Int(rect.height) else { return [] }
+            var bytes = [UInt8](repeating: 0, count: crop.width * crop.height * 4)
+            let rendered = bytes.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(data: buffer.baseAddress, width: crop.width, height: crop.height,
+                    bitsPerComponent: 8, bytesPerRow: crop.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                context.interpolationQuality = .none
+                context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
+                return true
+            }
+            return rendered ? bytes : []
+        }
+        let left = pixels(first, a), right = pixels(second, b)
+        guard left.count == right.count, !left.isEmpty else { return .infinity }
+        var error = 0.0
+        for index in left.indices where index % 4 != 3 {
+            error += Double(abs(Int(left[index]) - Int(right[index])))
+        }
+        return error / Double(left.count / 4 * 3)
     }
 #endif
 }

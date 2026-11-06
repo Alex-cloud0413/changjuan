@@ -11,13 +11,13 @@
   <img src="https://img.shields.io/badge/platform-iOS%2027%2B-000000?logo=apple&logoColor=white" alt="Platform: iOS 27+">
   <img src="https://img.shields.io/badge/Swift-5.0-F05138?logo=swift&logoColor=white" alt="Swift 5.0">
   <img src="https://img.shields.io/badge/Xcode-27.1-147EFB?logo=xcode&logoColor=white" alt="Xcode 27.1">
-  <img src="https://img.shields.io/badge/version-1.1.5%20(Build%2048)-lightgrey" alt="Version 1.1.5 (Build 48)">
+  <img src="https://img.shields.io/badge/version-1.1.5%20(Build%2049)-lightgrey" alt="Version 1.1.5 (Build 49)">
 </p>
 
 <p align="center"><b>简体中文</b> · App 内支持中文 / English 界面切换</p>
 
 > [!NOTE]
-> **当前代码候选：1.1.5（Build 48），用于 Duo 回归修复与连接 iPhone 的原位测试，尚未以此版本提交 App Store。** 本轮范围见 [Build 48 记录](Tests/Validation-1.1.5-build48-device.md)；上一轮提交见 [Build 47 记录](Tests/Validation-1.1.4-build47-release.md)。
+> **当前代码候选：1.1.5（Build 49），补充照片背景状态栏裁切修复，用于连接 iPhone 的原位测试，尚未以此版本提交 App Store。** 本轮范围见 [Build 49 记录](Tests/Validation-1.1.5-build49-photo-statusbar.md)；Duo 回归修复见 [Build 48 记录](Tests/Validation-1.1.5-build48-device.md)；上一轮提交见 [Build 47 记录](Tests/Validation-1.1.4-build47-release.md)。
 
 ---
 
