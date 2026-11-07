@@ -88,8 +88,8 @@ struct FeedbackView: View {
                 }
                 Button(language.text("取消"), role: .cancel) {}
             } message: {
-                if mailHandoffs.contains(where: { $0.bodyToCopy != nil }) {
-                    Text(language.text("选择拷贝正文的选项后，请在邮件中粘贴。"))
+                if mailHandoffs.contains(where: { $0.paste != nil }) {
+                    Text(language.text("如果选项会拷贝内容，请在邮件中粘贴后再发送。"))
                 }
             }
         }
@@ -117,9 +117,15 @@ struct FeedbackView: View {
         canUseMailComposer = MFMailComposeViewController.canSendMail()
         mailHandoffs = FeedbackMailClient.allCases.compactMap { client in
             // iOS exposes a scheme check for specific clients, not a list of mail apps.
-            guard let handoff = draft.externalHandoff(to: client, diagnosticsLabel: language.text("诊断信息")),
-                  client == .systemDefault || UIApplication.shared.canOpenURL(handoff.url) else { return nil }
-            return handoff
+            if let endpoint = client.composeEndpoint {
+                guard let probe = URL(string: endpoint), UIApplication.shared.canOpenURL(probe) else { return nil }
+            }
+            return draft.externalHandoff(
+                to: client,
+                diagnosticsLabel: language.text("诊断信息"),
+                diagnosticsPasteHint: language.text("[发送前请在邮件正文末尾粘贴已拷贝的诊断信息。]"),
+                bodyPasteHint: language.text("[发送前请用长卷已拷贝的反馈正文替换这一行。]")
+            )
         }
         isChoosingMailApp = true
     }
@@ -131,7 +137,11 @@ struct FeedbackView: View {
         case .gmail: name = "Gmail"
         case .outlook: name = "Outlook"
         }
-        return handoff.bodyToCopy == nil ? name : language.format("拷贝正文并打开%@", name)
+        switch handoff.paste {
+        case .diagnostics: return language.format("拷贝诊断并打开%@", name)
+        case .body: return language.format("拷贝正文并打开%@", name)
+        case nil: return name
+        }
     }
 
     private func openAppleMail() {
@@ -145,14 +155,23 @@ struct FeedbackView: View {
 
     private func openEmail(_ handoff: FeedbackMailHandoff) {
         notice = nil
-        if let text = handoff.bodyToCopy {
+        switch handoff.paste {
+        case .diagnostics(let text):
+            copyBody(text)
+            showNotice("已拷贝诊断信息，请粘贴到邮件正文末尾。")
+        case .body(let text):
             copyBody(text)
             showNotice("已拷贝正文，请在邮件中粘贴。")
+        case nil:
+            break
         }
         openURL(handoff.url) { accepted in
             if !accepted {
-                showNotice(handoff.bodyToCopy != nil ? "无法打开邮件 App。正文已拷贝，可在其他邮件 App 中粘贴。"
-                                                      : "无法打开邮件 App，请拷贝反馈正文后手动发送。")
+                if case .body = handoff.paste {
+                    showNotice("无法打开邮件 App。正文已拷贝，可在其他邮件 App 中粘贴。")
+                } else {
+                    showNotice("无法打开邮件 App，请拷贝反馈正文后手动发送。")
+                }
             }
         }
     }
