@@ -12,6 +12,7 @@ const tests = dirname(fileURLToPath(import.meta.url));
 const root = resolve(tests, '..');
 const simulator = process.argv[2];
 assert.ok(simulator, 'Pass a booted iOS 27 simulator UDID');
+const qualityDiagnostics = process.argv.slice(3).includes('--quality-diagnostics');
 const work = mkdtempSync(join(tmpdir(), 'LongShotNativeRegressions-'));
 function run(command, args) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 180_000, maxBuffer: 8 * 1024 * 1024 });
@@ -31,6 +32,7 @@ const sdk = run('xcrun', ['--sdk', 'iphonesimulator', '--show-sdk-path']);
 const binary = join(work, 'native-capture-regressions');
 run('xcrun', ['swiftc', '-O', '-swift-version', '5', '-target', 'arm64-apple-ios27.0-simulator', '-sdk', sdk,
   '-module-cache-path', join(work, 'cache'), '-D', 'LONGSHOT_CAPTURE_CHECKS',
+  ...(qualityDiagnostics ? ['-D', 'LONGSHOT_STATUS_QUALITY_DIAGNOSTICS', join(root, 'LongShotApp/CaptureProcessingDiagnostics.swift')] : []),
   ...['CaptureConstants.swift', 'CaptureStorage.swift', 'OverlapEstimator.swift', 'HorizontalTableMatcher.swift'].map(name => join(root, 'Shared', name)),
   ...['FrameStitcher.swift', 'FramePreparationCache.swift'].map(name => join(root, 'LongShotApp', name)),
   production, join(tests, 'NativeCaptureRegressionsCheck.swift'), '-o', binary]);

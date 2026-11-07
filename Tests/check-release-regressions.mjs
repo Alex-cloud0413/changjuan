@@ -106,6 +106,10 @@ try {
     ['Tests/check-capture-pipeline-diagnostics.mjs', simulator]);
   step('native-capture-regressions', 'native-capture+SCK-metadata-key-shim', process.execPath,
     ['Tests/check-native-capture-regressions.mjs', simulator]);
+  step('status-quality-diagnostics', 'native-synthetic-pixel+owned-storage', process.execPath,
+    ['Tests/check-status-capture-quality-diagnostics.mjs']);
+  step('native-capture-quality-diagnostics', 'diagnostic-enabled-native-pipeline', process.execPath,
+    ['Tests/check-native-capture-regressions.mjs', simulator, '--quality-diagnostics']);
   step('duo-preview', 'native-UIKit+injected-system-insets', process.execPath,
     ['Tests/check-duo-preview.mjs', simulator]);
   step('statusbar-crop', 'native-Vision+UIKit+synthetic-pixel-oracle', process.execPath,
@@ -141,7 +145,7 @@ try {
   const widgetInfo = info(join(deviceApp, 'PlugIns/LongScrollWidgets.appex/Info.plist'));
   for (const key of ['CFBundleVersion', 'CFBundleShortVersionString', 'MinimumOSVersion']) assert.equal(appInfo[key], widgetInfo[key]);
   const executable = readFileSync(join(deviceApp, appInfo.CFBundleExecutable));
-  for (const hook of ['--snapshot-', '--benchmark-latest', '--export-frames']) {
+  for (const hook of ['--snapshot-', '--benchmark-latest', '--export-frames', 'StatusCaptureQualityDiagnostics', 'LongShotStatusQuality']) {
     assert.ok(!executable.includes(Buffer.from(hook)), `Developer hook must not enter standard Release: ${hook}`);
   }
   report.build = { version: appInfo.CFBundleShortVersionString, build: appInfo.CFBundleVersion,

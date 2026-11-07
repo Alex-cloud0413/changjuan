@@ -808,6 +808,9 @@ final class ScreenFramePipeline: @unchecked Sendable {
         isPausedForNextPage = false
         diagnostics = ScreenFramePipelineDiagnostics()
         CaptureCommandStore.clearFinishRequest()
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+        StatusCaptureQualityDiagnostics.begin(sessionURL: session.0)
+#endif
         return session.0
     }
 
@@ -880,6 +883,13 @@ final class ScreenFramePipeline: @unchecked Sendable {
                 lastSavedPresentationTime = presentationTime
                 diagnostics.accept(index: frameIndex - 1, presentationTime: presentationTime,
                     width: image.cgImage?.width ?? 0, height: image.cgImage?.height ?? 0, bytes: data.count)
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+                if let captured = image.cgImage {
+                    StatusCaptureQualityDiagnostics.captured(image: captured, encodedFrame: data,
+                        index: frameIndex - 1, sessionURL: sessionURL,
+                        metadata: qualityMetadata(from: sampleBuffer))
+                }
+#endif
                 // The full-quality JPEG is already committed. A slow or full
                 // preparation queue never drops capture frames or delays finish.
                 preprocessor.enqueue(data, for: url, options: manifest?.captureOptions ?? CaptureOptions())
@@ -989,6 +999,26 @@ final class ScreenFramePipeline: @unchecked Sendable {
         return status == .complete || status == .started
 #endif
     }
+
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+    private func qualityMetadata(from sampleBuffer: CMSampleBuffer) -> [String: Any] {
+        var values: [String: Any] = ["videoOrientation": videoOrientation(from: sampleBuffer)]
+        if let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            values["pixelBufferWidth"] = CVPixelBufferGetWidth(buffer)
+            values["pixelBufferHeight"] = CVPixelBufferGetHeight(buffer)
+            values["pixelFormat"] = CVPixelBufferGetPixelFormatType(buffer)
+        }
+#if !LONGSHOT_CAPTURE_CHECKS
+        if let entries = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+            as? [[SCStreamFrameInfo: Any]], let entry = entries.first {
+            values["contentScale"] = entry[.contentScale] as? NSNumber
+            values["scaleFactor"] = entry[.scaleFactor] as? NSNumber
+            if let rect = entry[.contentRect] { values["contentRectDescription"] = String(describing: rect) }
+        }
+#endif
+        return values
+    }
+#endif
 
     private func makeImage(from sampleBuffer: CMSampleBuffer) -> UIImage? {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {

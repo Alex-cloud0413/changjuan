@@ -3,6 +3,9 @@ import CoreVideo
 import Foundation
 import ImageIO
 import UIKit
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+import CryptoKit
+#endif
 
 // SCK is device-only. Keep its simulator substitutes limited to typed metadata
 // keys and status values; all orientation/filtering/JPEG logic is production.
@@ -27,11 +30,35 @@ struct NativeCaptureRegressionsCheck {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LongShotNativeRegressions-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         CaptureStorage.testContainerURL = directory
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+        StatusCaptureQualityDiagnostics.testDocumentsDirectoryURL = directory.appendingPathComponent("DiagnosticDocuments")
+#endif
         try testColdIntentAndInactiveVisibility()
         try testSceneGeometryAndUnknownGeometry()
         try testOrientationAndGeometryPersistence()
         try testRejectedFramesNeverCreateBoundaries()
         try testResumedGeometryHasOneBoundary()
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+        StatusCaptureQualityDiagnostics.waitForPendingDiagnostics()
+        let documents = StatusCaptureQualityDiagnostics.testDocumentsDirectoryURL!
+        let qualityRoot = documents.appendingPathComponent("LongShotStatusQuality")
+        let sessions = try FileManager.default.contentsOfDirectory(at: qualityRoot, includingPropertiesForKeys: [.isDirectoryKey])
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+        require(sessions.count == 1, "Only the latest diagnostic session survives the real pipeline")
+        let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: sessions[0].appendingPathComponent("manifest.json"))) as! [String: Any]
+        let frames = manifest["frames"] as! [[String: Any]]
+        require(frames.count == 1 && frames[0]["status"] as? String == "captured", "Committed pipeline frame has a diagnostic pair")
+        let originalSession = try CaptureStorage.allSessions().first { $0.manifest.id == manifest["sessionID"] as? String }!
+        let originalURL = CaptureStorage.frameURL(index: 0, sessionURL: originalSession.url)
+        let original = try Data(contentsOf: originalURL)
+        let hash = SHA256.hash(data: original).map { String(format: "%02x", $0) }.joined()
+        require(hash == frames[0]["encodedFrameSHA256"] as? String, "Diagnostic pair identifies the exact committed JPEG")
+        StatusCaptureQualityDiagnostics.clear()
+        require(!FileManager.default.fileExists(atPath: qualityRoot.path), "Explicit diagnostic cleanup succeeds")
+        let afterClear = try Data(contentsOf: originalURL)
+        require(afterClear == original, "Diagnostic cleanup preserves the real capture bytes")
+        print("Diagnostic-enabled production pipeline attribution passed")
+#endif
         print("Native capture regressions passed (5 groups): cold/background intent; initially inactive host; scene geometry; metadata orientation/JPEG dimensions; pause/resume persistence and raw JPEG preservation. Synthetic SCK metadata keys; no stream/device coverage.")
     }
 

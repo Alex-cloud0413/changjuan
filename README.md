@@ -11,13 +11,13 @@
   <img src="https://img.shields.io/badge/platform-iOS%2027%2B-000000?logo=apple&logoColor=white" alt="Platform: iOS 27+">
   <img src="https://img.shields.io/badge/Swift-5.0-F05138?logo=swift&logoColor=white" alt="Swift 5.0">
   <img src="https://img.shields.io/badge/Xcode-27.1-147EFB?logo=xcode&logoColor=white" alt="Xcode 27.1">
-  <img src="https://img.shields.io/badge/version-1.1.5%20(Build%2051)-lightgrey" alt="Version 1.1.5 (Build 51)">
+  <img src="https://img.shields.io/badge/version-1.1.5%20(Build%2052)-lightgrey" alt="Version 1.1.5 (Build 52)">
 </p>
 
 <p align="center"><b>简体中文</b> · App 内支持中文 / English 界面切换</p>
 
 > [!NOTE]
-> **当前代码候选：1.1.5（Build 51）。开启「保留状态栏」时原样保留录制画面，包括灵动岛与录制标记；关闭时保留已验证的识别裁切。用于连接 iPhone 实测，尚未提交 App Store。** 见 [Build 51 记录](Tests/Validation-1.1.5-build51-raw-statusbar.md)；[Build 50 修补方案已撤回](Tests/Validation-1.1.5-build50-clean-statusbar.md)；此前 [照片背景裁切修复](Tests/Validation-1.1.5-build49-photo-statusbar.md)、[Duo 回归修复](Tests/Validation-1.1.5-build48-device.md)。
+> **当前代码候选：1.1.5（Build 52）。状态栏清晰度仍在定位，不能视为修复完成。成品处理沿用 Build 51：开启「保留状态栏」时保留实际录制画面，包括灵动岛与录制标记；关闭时保留已验证的识别裁切。临时真机诊断包增加本地顶部样本，标准构建不包含该诊断。尚未提交 App Store。** 见 [开源实现与像素研究](Tests/Research-statusbar-quality-20261107.md)、[Build 52 记录](Tests/Validation-1.1.5-build52-status-quality-diagnostic.md)；[Build 51 记录](Tests/Validation-1.1.5-build51-raw-statusbar.md)、[Build 50 修补方案已撤回](Tests/Validation-1.1.5-build50-clean-statusbar.md)；此前 [照片背景裁切修复](Tests/Validation-1.1.5-build49-photo-statusbar.md)、[Duo 回归修复](Tests/Validation-1.1.5-build48-device.md)。
 
 ---
 

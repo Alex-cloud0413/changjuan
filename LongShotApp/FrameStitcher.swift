@@ -1325,6 +1325,14 @@ final class FrameStitcher {
             throw StitchError.couldNotEncode
         }
         try data.write(to: outputURL, options: .atomic)
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+        // Only the literal first piece maps to destination y=0. Other pages,
+        // separators and cropped prefixes must not be paired with frame zero.
+        if let first = page.first, let sourceURL = first.frameURL, let canvas = image.cgImage {
+            StatusCaptureQualityDiagnostics.exported(image: canvas, encodedOutput: data,
+                sourceURL: sourceURL, sourceRect: first.sourceRect, outputURL: outputURL)
+        }
+#endif
     }
 
     private func renderHorizontal(page: [Piece], originalHeight: CGFloat, topCropRatio: Double,

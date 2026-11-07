@@ -372,6 +372,9 @@ final class AppModel: ObservableObject {
         let protection = CaptureProcessingBackgroundTask(name: "清理录制缓存", stage: "manualCacheCleanup")
         defer { protection.end() }
         let report = await Task.detached(priority: .utility) { SavedCaptureCleanup.clearAllRawCaches() }.value
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+        StatusCaptureQualityDiagnostics.clear()
+#endif
         if let activeSessionURL, report.clearedRawSessionIDs.contains(activeSessionURL.lastPathComponent),
            case .failed = phase {
             self.activeSessionURL = nil
