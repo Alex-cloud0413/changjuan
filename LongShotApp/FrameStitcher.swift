@@ -1132,7 +1132,8 @@ final class FrameStitcher {
             // height. Existing positive manifest crops remain unchanged.
             if detectsStatusBar, options.axis == .vertical, !options.keepsStatusBar,
                let image = UIImage(contentsOfFile: source.path)?.cgImage,
-               let bottom = CaptureStatusBarDetector.bottom(in: image, maximumBottom: contentTop) {
+               let bottom = CaptureStatusBarDetector.bottom(in: image, maximumBottom: contentTop,
+                                                            allowsClocklessRecording: true) {
                 prefixTop = bottom
             }
             pieces.append(Piece(frameURL: source, sourceRect: CGRect(
@@ -2138,9 +2139,11 @@ enum CaptureStatusBarDetector {
         let top: CGFloat
         let bottom: CGFloat
         let padding: CGFloat
+        let isClocklessRecording: Bool
     }
 
-    private static func capsule(in image: CGImage, maximumBottom: CGFloat) -> Capsule? {
+    private static func capsule(in image: CGImage, maximumBottom: CGFloat,
+                                allowsClocklessRecording: Bool = false) -> Capsule? {
         let nativeWidth = CGFloat(image.width)
         guard image.height > image.width * 3 / 2, nativeWidth >= 200,
               maximumBottom.isFinite, maximumBottom > 0 else { return nil }
@@ -2163,6 +2166,14 @@ enum CaptureStatusBarDetector {
         struct Blob {
             var left: Int; var right: Int; var low: Int; var high: Int; var count: Int
             var w: Int { right - left + 1 }; var h: Int { high - low + 1 }
+
+            func enclosesCenteredCore(_ other: Blob) -> Bool {
+                left < other.left && other.right < right && low < other.low && other.high < high
+                    && other.w * 2 <= w && other.h * 2 <= h
+                    && abs((left + right) - (other.left + other.right)) <= w / 4
+                    && abs((low + high) - (other.low + other.high)) <= h / 4
+            }
+
         }
         func components(_ mask: [Bool]) -> [Blob] {
             var mask = mask, result: [Blob] = []
@@ -2192,7 +2203,8 @@ enum CaptureStatusBarDetector {
             let r = Int(pixels[i]), g = Int(pixels[i + 1]), b = Int(pixels[i + 2])
             return r > 60 && Double(r) > Double(g) * 1.5 && Double(r) > Double(b) * 1.5 && g < 100 && b < 100
         })
-        func recordingMark(in box: Blob, darkCenter: Bool, alignedWith main: Blob? = nil) -> Bool {
+        func recordingMark(in box: Blob, darkCenter: Bool, alignedWith main: Blob? = nil,
+                           allowRingEdgeSamples: Bool = false) -> Bool {
             marks.contains { mark in
                 let x = (mark.left + mark.right) / 2, y = (mark.low + mark.high) / 2
                 let referenceHeight = main?.h ?? box.h
@@ -2206,12 +2218,13 @@ enum CaptureStatusBarDetector {
                 } else {
                     guard y >= box.low + box.h / 5, y <= box.high - box.h / 5 else { return false }
                 }
-                if darkCenter {
-                    guard x < box.left + box.w / 3 || x > box.right - box.w / 3 else { return false }
-                    let center = (-1...1).flatMap { yy in (-1...1).map { xx in light(x + xx, y + yy) } }
-                    return center.reduce(0, +) / center.count < 40
+                guard darkCenter else { return true }
+                guard x < box.left + box.w / 3 || x > box.right - box.w / 3 else { return false }
+                let center = (-1...1).flatMap { yy in (-1...1).map { xx in light(x + xx, y + yy) } }
+                if allowRingEdgeSamples {
+                    return center[4] < 40 && center.filter { $0 < 40 }.count >= 5
                 }
-                return true
+                return center.reduce(0, +) / center.count < 40
             }
         }
         func hasSurround(_ box: Blob, photographic: Bool, threshold: Int) -> Bool {
@@ -2237,6 +2250,45 @@ enum CaptureStatusBarDetector {
                 && upper > box.w / 3 && lower > box.w / 3
                 && upper < box.w * 97 / 100 && lower < box.w * 97 / 100
         }
+        func hasQuietSurround(main: Blob, bubble: Blob, cut: Int) -> Bool {
+            // When iOS omits the clock and right-side icons, prove the whole
+            // removable band has a quiet background around the two indicators.
+            // Check the native rows so a thin app divider cannot disappear
+            // during shape analysis. Round the one-sample contour halo outward.
+            guard cut > 0, cut <= band,
+                  let strip = image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: cut)) else { return false }
+            let rowBytes = image.width * 4
+            var nativePixels = [UInt8](repeating: 0, count: rowBytes * cut)
+            let rendered = nativePixels.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(data: buffer.baseAddress, width: image.width, height: cut,
+                    bitsPerComponent: 8, bytesPerRow: rowBytes, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+                context.interpolationQuality = .none
+                context.draw(strip, in: CGRect(x: 0, y: 0, width: image.width, height: cut))
+                return true
+            }
+            guard rendered else { return false }
+            let scaleX = nativeWidth / CGFloat(width), scaleY = CGFloat(band) / CGFloat(height)
+            func halo(_ box: Blob) -> (columns: Range<Int>, rows: Range<Int>) {
+                let left = Int(floor(CGFloat(box.left - 1) * scaleX))
+                let right = Int(ceil(CGFloat(box.right + 2) * scaleX))
+                let top = Int(floor(CGFloat(box.low - 1) * scaleY))
+                let bottom = Int(ceil(CGFloat(box.high + 2) * scaleY))
+                return (left..<right, top..<bottom)
+            }
+            let mainHalo = halo(main), bubbleHalo = halo(bubble)
+            for y in 0..<cut {
+                let inMainRows = mainHalo.rows.contains(y), inBubbleRows = bubbleHalo.rows.contains(y)
+                for x in 0..<image.width where !(inMainRows && mainHalo.columns.contains(x))
+                    && !(inBubbleRows && bubbleHalo.columns.contains(x)) {
+                    let offset = y * rowBytes + x * 4
+                    for channel in 0..<3 where abs(Int(nativePixels[offset + channel]) - Int(nativePixels[channel])) > 16 {
+                        return false
+                    }
+                }
+            }
+            return true
+        }
         func detect(threshold: Int, photographic: Bool) -> Capsule? {
             let blobs = components((0..<(width * height)).map { light($0 % width, $0 / width) < threshold })
             let candidates = blobs.filter { box in
@@ -2251,9 +2303,15 @@ enum CaptureStatusBarDetector {
             guard candidates.count == 1, let main = candidates.first else { return nil }
             // A separate recording circle may sit lower than the main island.
             // Include its entire proved contour, or retain the whole prefix.
-            let bubbles = blobs.filter { box in
+            let markedBubbles = blobs.filter { box in
                 box.left > main.right && box.left - main.right <= main.h
                     && recordingMark(in: box, darkCenter: false, alignedWith: main)
+            }
+            // A bright recording ring can separate its own dark interior
+            // from the outer black circle. Its red core marks that interior
+            // too, but a fully enclosed component is part of the same bubble.
+            let bubbles = markedBubbles.filter { box in
+                !markedBubbles.contains { $0.enclosesCenteredCore(box) }
             }
             // A plausible recording endcap with an uncertain outline cannot
             // be ignored: cropping only the main capsule would cut through it.
@@ -2265,27 +2323,35 @@ enum CaptureStatusBarDetector {
             }) else { return nil }
             let bottom = max(main.high, bubbles.first?.high ?? main.high)
             let scaleY = CGFloat(band) / CGFloat(height)
-            let evidence = Capsule(band: band, top: CGFloat(main.low) * scaleY,
-                bottom: CGFloat(bottom + 1) * scaleY, padding: max(2, nativeWidth / CGFloat(width)))
-            guard ceil(evidence.bottom + evidence.padding) <= maximumBottom else { return nil }
-            return evidence
+            let nativeBottom = CGFloat(bottom + 1) * scaleY
+            let padding = max(2, nativeWidth / CGFloat(width))
+            let cut = ceil(nativeBottom + padding)
+            guard cut <= maximumBottom else { return nil }
+            let isClocklessRecording = allowsClocklessRecording && (bubbles.first.map { bubble in
+                recordingMark(in: main, darkCenter: true, allowRingEdgeSamples: true)
+                    && markedBubbles.contains { bubble.enclosesCenteredCore($0) }
+                    && hasQuietSurround(main: main, bubble: bubble, cut: Int(cut))
+            } ?? false)
+            return Capsule(band: band, top: CGFloat(main.low) * scaleY,
+                bottom: nativeBottom, padding: padding, isClocklessRecording: isClocklessRecording)
         }
         // Preserve the original neutral-background route. Photography requires
-        // stricter black geometry plus recording-ring evidence and local contrast;
-        // the same native clock proof below still applies before output cropping.
+        // stricter black geometry plus recording-ring evidence and local contrast.
         return detect(threshold: 65, photographic: false) ?? detect(threshold: 24, photographic: true)
     }
 
-    /// Geometry only, after a page's first native frame has proved its clock.
+    /// Geometry only, after a page's first native frame has proved its status band.
     /// Later compact-capsule motion needs no repeated OCR or arbitrary safe area.
     static func capsuleBottom(in image: CGImage, maximumBottom: CGFloat) -> CGFloat? {
         guard let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
         return ceil(evidence.bottom + evidence.padding)
     }
 
-    static func bottom(in image: CGImage, maximumBottom: CGFloat) -> CGFloat? {
+    static func bottom(in image: CGImage, maximumBottom: CGFloat, allowsClocklessRecording: Bool = false) -> CGFloat? {
         let nativeWidth = CGFloat(image.width)
-        guard let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
+        guard let evidence = capsule(in: image, maximumBottom: maximumBottom,
+                                     allowsClocklessRecording: allowsClocklessRecording) else { return nil }
+        if evidence.isClocklessRecording { return ceil(evidence.bottom + evidence.padding) }
         let band = evidence.band
         // OCR only the left status-clock area, once per selected page prefix.
         // Native bounds convert Vision's bottom-origin boxes to top pixels.

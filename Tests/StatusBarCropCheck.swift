@@ -24,6 +24,7 @@ struct StatusBarCropCheck {
         }
 #endif
         try checkNativeDetector()
+        try checkClocklessRecordingDetector()
         if let flag = CommandLine.arguments.firstIndex(of: "--fixture") {
             require(flag + 1 < CommandLine.arguments.count, "--fixture needs a local image path")
             try checkPrivateFixture(URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
@@ -38,13 +39,15 @@ struct StatusBarCropCheck {
 
     private enum Shape { case capsule, recordingCapsule, splitRecording, spurredRecordingBubble, rectangle, circle, absent }
     private enum HeaderBackground { case plain, textured, photographic, unboundedShadow }
+    private enum FullScreenPair { case recording, unmarked, unmarkedCircle, bareRedDot, uncertainCircleEdge, inContent, foregroundGlyph, thinDivider }
 
     /// All coordinates are native pixels measured from the top-left.
     private static func makeHeader(width: Int = 1206, height: Int = 2622,
                                    clockTop: CGFloat? = 72, capsuleTop: CGFloat = 42,
                                    shape: Shape = .capsule,
                                    dark: Bool = false, scale: CGFloat = 1,
-                                   background: HeaderBackground = .plain) throws -> CGImage {
+                                   background: HeaderBackground = .plain,
+                                   fullScreenPair: FullScreenPair? = nil) throws -> CGImage {
         guard let context = CGContext(data: nil, width: width, height: height,
             bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw CheckError.image }
@@ -55,7 +58,9 @@ struct StatusBarCropCheck {
         if background != .plain {
             try drawPatternedHeader(in: context, width: width, height: height, scale: scale, background: background)
         }
-        if shape != .absent {
+        if let fullScreenPair {
+            drawFullScreenPair(fullScreenPair, top: capsuleTop, width: width, scale: scale, in: context)
+        } else if shape != .absent {
             let rect = CGRect(x: CGFloat(width) / 2 - 176 * scale, y: capsuleTop,
                               width: 352 * scale, height: 108 * scale)
             context.setFillColor(CGColor(gray: 0, alpha: 1))
@@ -124,6 +129,56 @@ struct StatusBarCropCheck {
                  size: 42 * scale, color: CGColor(gray: dark || background != .plain ? 1 : 0, alpha: 1), in: context)
         guard let image = context.makeImage() else { throw CheckError.image }
         return image
+    }
+
+    /// Synthetic full-screen layout with no clock or network/battery glyphs.
+    /// The recording capsule is offset left to make room for its aligned circle.
+    private static func drawFullScreenPair(_ variant: FullScreenPair, top: CGFloat, width: Int,
+                                           scale: CGFloat, in context: CGContext) {
+        let y = variant == .inContent ? top + 210 * scale : top
+        let main = CGRect(x: CGFloat(width) / 2 - 282 * scale, y: y,
+            width: 470 * scale, height: 108 * scale)
+        let circle = CGRect(x: main.maxX + 20 * scale, y: y,
+            width: 116 * scale, height: 108 * scale)
+        let black = CGColor(gray: 0, alpha: 1)
+        let red = CGColor(red: 0.98, green: 0.13, blue: 0.19, alpha: 1)
+        context.setFillColor(black)
+        context.addPath(CGPath(roundedRect: main, cornerWidth: 54 * scale,
+            cornerHeight: 54 * scale, transform: nil))
+        context.fillPath()
+        if variant != .bareRedDot { context.fillEllipse(in: circle) }
+        if variant == .uncertainCircleEdge {
+            context.fill(CGRect(x: circle.midX - 20 * scale, y: y + 92 * scale,
+                width: 40 * scale, height: 84 * scale))
+        }
+        guard variant != .unmarked else { return }
+        let mainMark = CGRect(x: main.minX + 25 * scale, y: y + 30 * scale,
+            width: 46 * scale, height: 46 * scale)
+        context.setFillColor(CGColor(red: 0.62, green: 0.24, blue: 0.18, alpha: 1))
+        context.fillEllipse(in: mainMark)
+        context.setFillColor(black)
+        context.fillEllipse(in: mainMark.insetBy(dx: 15 * scale, dy: 15 * scale))
+        guard variant != .unmarkedCircle else { return }
+        let circleMark = CGRect(x: circle.midX - 26 * scale, y: circle.midY - 26 * scale,
+            width: 52 * scale, height: 52 * scale)
+        if variant != .bareRedDot {
+            context.setFillColor(red)
+            context.fillEllipse(in: circleMark)
+            context.setFillColor(black)
+            context.fillEllipse(in: circleMark.insetBy(dx: 7 * scale, dy: 7 * scale))
+        }
+        context.setFillColor(red)
+        context.fillEllipse(in: circleMark.insetBy(dx: 16 * scale, dy: 16 * scale))
+        if variant == .foregroundGlyph {
+            let glyph = CGRect(x: 1020 * scale, y: y + 56 * scale, width: 32 * scale, height: 24 * scale)
+            context.setFillColor(CGColor(red: 0.1, green: 0.55, blue: 0.95, alpha: 1))
+            context.addPath(CGPath(roundedRect: glyph, cornerWidth: 6 * scale, cornerHeight: 6 * scale, transform: nil))
+            context.fillPath()
+        }
+        if variant == .thinDivider {
+            context.setFillColor(CGColor(gray: 0.8, alpha: 1))
+            context.fill(CGRect(x: 45 * scale, y: y + 108 * scale, width: 215 * scale, height: 1))
+        }
     }
 
     /// Procedural photo-like lighting and texture, with no private image pixels.
@@ -260,6 +315,38 @@ struct StatusBarCropCheck {
         }
     }
 
+    private static func checkClocklessRecordingDetector() throws {
+        for variant in [FullScreenPair.foregroundGlyph, .thinDivider] {
+            let foreground = try makeHeader(clockTop: nil, fullScreenPair: variant)
+            require(CaptureStatusBarDetector.capsuleBottom(in: foreground, maximumBottom: 196) != nil,
+                    "Foreground content beside the recording pair leaves its geometry intact")
+            require(CaptureStatusBarDetector.bottom(in: foreground, maximumBottom: 196, allowsClocklessRecording: true) == nil,
+                    "An app glyph or one-pixel divider above the cut prevents clockless cropping")
+        }
+        for (name, variant) in [("unmarked capsule and circle", FullScreenPair.unmarked),
+                                ("recording capsule beside an unmarked circle", .unmarkedCircle),
+                                ("bare red dot without a detached black circle", .bareRedDot),
+                                ("detached circle connected to a lower black edge", .uncertainCircleEdge),
+                                ("recording-like objects in the app content", .inContent)] {
+            let image = try makeHeader(clockTop: nil, fullScreenPair: variant)
+            require(CaptureStatusBarDetector.bottom(in: image, maximumBottom: 196, allowsClocklessRecording: true) == nil,
+                    "Clockless content needs a complete recording pair before cropping. \(name)")
+        }
+        for (width, height) in [(1206, 2622), (1005, 2185)] {
+            let scale = CGFloat(width) / 1206
+            let image = try makeHeader(width: width, height: height, clockTop: nil,
+                capsuleTop: 42 * scale, scale: scale, fullScreenPair: .recording)
+            let limit = floor(CGFloat(height) * 0.075)
+            let bottom = CaptureStatusBarDetector.bottom(in: image, maximumBottom: limit, allowsClocklessRecording: true)
+            require(bottom != nil && bottom! >= 150 * scale && bottom! <= 170 * scale,
+                    "A complete recording pair proves the full status band without clock or battery at native width \(width). Bottom \(String(describing: bottom))")
+            require(CaptureStatusBarDetector.bottom(in: image, maximumBottom: 146 * scale, allowsClocklessRecording: true) == nil,
+                    "Clockless recording proof preserves the frame when the maximum would bisect its circles")
+            require(CaptureStatusBarDetector.bottom(in: image, maximumBottom: limit) == nil,
+                    "Horizontal status analysis still requires clock evidence")
+        }
+    }
+
     private static func checkPrivateFixture(_ url: URL) throws {
         let original = try Data(contentsOf: url, options: .mappedIfSafe)
         guard let source = CGImageSourceCreateWithData(original as CFData, nil),
@@ -267,9 +354,10 @@ struct StatusBarCropCheck {
         require(image.width >= 200 && image.height > image.width * 3 / 2,
                 "Expected an authorized native portrait result, got \(image.width)×\(image.height)")
         let scale = CGFloat(image.width) / 1206
-        let bottom = CaptureStatusBarDetector.bottom(in: image, maximumBottom: floor(CGFloat(image.height) * 0.075))
+        let bottom = CaptureStatusBarDetector.bottom(in: image, maximumBottom: floor(CGFloat(image.height) * 0.075),
+                                                     allowsClocklessRecording: true)
         require(bottom != nil && bottom! >= 130 * scale && bottom! <= 200 * scale,
-                "Authorized result must remove the complete island before the Weixin title: \(String(describing: bottom))")
+                "Authorized result must remove the complete island before app navigation: \(String(describing: bottom))")
         // Match the capture writer's JPEG quality without creating a private file.
         guard let captureJPEG = CFDataCreateMutable(kCFAllocatorDefault, 0),
               let destination = CGImageDestinationCreateWithData(captureJPEG, "public.jpeg" as CFString, 1, nil) else {
@@ -283,7 +371,7 @@ struct StatusBarCropCheck {
         require(captureImage.width == image.width && captureImage.height == image.height,
                 "In-memory JPEG 0.9 preserves the private native dimensions")
         let captureBottom = CaptureStatusBarDetector.bottom(in: captureImage,
-            maximumBottom: floor(CGFloat(captureImage.height) * 0.075))
+            maximumBottom: floor(CGFloat(captureImage.height) * 0.075), allowsClocklessRecording: true)
         require(captureBottom != nil && captureBottom! >= 130 * scale && captureBottom! <= 200 * scale
                 && abs(captureBottom! - bottom!) <= 6,
                 "Capture-quality JPEG must preserve the complete private status boundary within six native pixels: \(String(describing: captureBottom))")
@@ -384,6 +472,7 @@ struct StatusBarCropCheck {
             checkRawStatusHeader(source: raw, output: a, label: "Native geometry \(index) ON")
         }
         try checkPatternedIntegration(in: root.appendingPathComponent("patterned"))
+        try checkClocklessRecordingIntegration(in: root.appendingPathComponent("clockless-recording"))
         try checkCapturedHeaderIntegration(in: root.appendingPathComponent("captured-header"))
         try checkHorizontalIntegration(in: root.appendingPathComponent("horizontal"))
         for (url, data) in originals {
@@ -427,6 +516,46 @@ struct StatusBarCropCheck {
             for (url, bytes) in originals {
                 require(try Data(contentsOf: url) == bytes, "Patterned source JPEG bytes remain unchanged")
             }
+        }
+    }
+
+    private static func checkClocklessRecordingIntegration(in root: URL) throws {
+        let frames = try makeScrollFrames(in: root.appendingPathComponent("frames"), status: true,
+            count: 2, jpegQuality: 0.9, fullScreenPair: .recording)
+        let originals = try frames.map { ($0, try Data(contentsOf: $0)) }
+        let source = try readImage(frames[0])
+        let detected = CaptureStatusBarDetector.bottom(in: source, maximumBottom: 196, allowsClocklessRecording: true)
+        require(detected != nil && detected! >= 150 && detected! <= 170,
+                "Native capture-quality JPEG proves the full recording pair without a clock or battery")
+        let cut = Int(detected!)
+        func stitch(keep: Bool) throws -> StitchResult {
+            do {
+                return try FrameStitcher(options: CaptureOptions(keepsStatusBar: keep)).stitch(
+                    frameURLs: frames, sessionURL: root.appendingPathComponent(keep ? "on" : "off"), topCropRatio: 0)
+            } catch {
+                FileHandle.standardError.write(Data("Clockless recording fixture failed at \(root.path), keep=\(keep), error=\(error)\n".utf8))
+                throw error
+            }
+        }
+        let off = try stitch(keep: false), on = try stitch(keep: true)
+        require(off.outputURLs.count == 1 && on.outputURLs.count == 1,
+                "Clockless recording produces one native scrolling result in both modes")
+        let cropped = try readImage(off.outputURLs[0]), kept = try readImage(on.outputURLs[0])
+        require(cropped.width == source.width && kept.width == source.width
+                && kept.height == source.height + 137 && kept.height - cropped.height == cut,
+                "OFF removes only the proved clockless recording band and ON retains all original rows")
+        require(nativePixelError(source, rect: CGRect(x: 0, y: cut, width: source.width, height: 120),
+                                 cropped, rect: CGRect(x: 0, y: 0, width: source.width, height: 120)) < 5,
+                "OFF retains the navigation and content immediately below the recording pair")
+        for (name, roi) in [("full top band", CGRect(x: 0, y: 0, width: source.width, height: 196)),
+                            ("left recording mark", CGRect(x: 340, y: 66, width: 58, height: 58)),
+                            ("detached recording circle", CGRect(x: 811, y: 42, width: 116, height: 108)),
+                            ("detached recording mark", CGRect(x: 840, y: 66, width: 60, height: 60))] {
+            require(nativePixelError(source, rect: roi, kept, rect: roi) < 5,
+                    "ON preserves the captured clockless \(name) at native resolution")
+        }
+        for (url, bytes) in originals {
+            require(try Data(contentsOf: url) == bytes, "Clockless recording source JPEG bytes remain unchanged")
         }
     }
 
@@ -663,7 +792,7 @@ struct StatusBarCropCheck {
                                          headerOffset: CGFloat = 0, headerMovement: Int = 0, earlyMovingRow: Bool = false,
                                          background: HeaderBackground = .plain, indicator: Shape = .capsule,
                                          jpegQuality: CGFloat = 0.94, scrollOffsets: [Int]? = nil,
-                                         transientOpening: Bool = false) throws -> [URL] {
+                                         transientOpening: Bool = false, fullScreenPair: FullScreenPair? = nil) throws -> [URL] {
         precondition(scrollOffsets == nil || scrollOffsets?.count == count)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let format = UIGraphicsImageRendererFormat()
@@ -693,9 +822,10 @@ struct StatusBarCropCheck {
             let temporalOffset = headerOffset + CGFloat(index * (axis == .vertical ? 2 : headerMovement))
             let scrollOffset = scrollOffsets?[index] ?? index * 137
             let header = try makeHeader(width: width, height: height,
-                clockTop: status ? CGFloat(72 + temporalOffset) * scale : nil,
+                clockTop: status && fullScreenPair == nil ? CGFloat(72 + temporalOffset) * scale : nil,
                 capsuleTop: CGFloat(42 + temporalOffset) * scale,
-                shape: status ? indicator : .absent, scale: scale, background: background)
+                shape: status ? indicator : .absent, scale: scale, background: background,
+                fullScreenPair: fullScreenPair)
             let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { context in
                 UIImage(cgImage: header).draw(at: .zero)
                 context.cgContext.saveGState()

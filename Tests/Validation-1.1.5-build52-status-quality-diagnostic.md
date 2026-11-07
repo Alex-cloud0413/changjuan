@@ -24,4 +24,6 @@ Final coherent unified run: **33/33** gates passed, including the two new diagno
 
 The signed diagnostic package was installed in place from 1.1.5 (51) to **1.1.5 (52)**. A separate app inventory query confirmed 52; normal no-argument launch and independent process lookup succeeded. No uninstall, cache clear, preference reset or automatic recording was issued. A new user capture is needed to obtain paired on-device status-bar samples.
 
-Private image samples, device identifiers, provisioning material, native probe outputs and installation receipts stay outside public Git. Public research and test sources are recoverable from the feature branch. User capture acceptance and physical iPhone Duo coverage remain unverified; PR #2 remains a draft.
+The user accepted a portrait capture with Keep status bar ON. The supplied Photos original matched the app export byte for byte. The output selected frame index 13, outside the eight retained samples, so the run could not identify the first stage that softened the earlier screenshot. A subsequent portrait OFF capture showed a clockless recording island and detached circle still present. The original also matched the app export. See the [Build 54 record](Validation-1.1.5-build54-statusbar-off.md) for the fix.
+
+Private image samples, device identifiers, provisioning material, native probe outputs and installation receipts stay outside public Git. Physical iPhone Duo coverage remains unverified.
