@@ -8,4 +8,4 @@ The production contour check enclosed the reported overlay in a native `(174, 28
 
 The final coherent run passed **33/33** gates, including performance, pinned baseline output, horizontal geometry and standard device/simulator builds. Source/config/test SHA-256 is `6d868e4b4276b583c49059efd5b04f4197ac28c6764c8c30cccd0ce67c3fbdf9`. Report: `Build/regression-AmS0e4/report.json`.
 
-The signed standard device package passed strict signature and entitlement checks for 1.1.5 (55), including the widget. Its image diagnostic and developer hooks are absent. Connected iPhone acceptance is pending. Physical iPhone Duo acceptance remains unverified.
+The signed standard device package passed strict signature and entitlement checks for 1.1.5 (55), including the widget. Its image diagnostic and developer hooks are absent. After the iPhone upgrade, the user accepted the portrait OFF capture. The supplied OFF result preserved the navigation below a 158-pixel crop. The user separately reported joined indicators and soft status glyphs in the ON capture. Physical iPhone Duo acceptance remains unverified.

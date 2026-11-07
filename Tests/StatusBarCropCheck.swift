@@ -39,7 +39,7 @@ struct StatusBarCropCheck {
 
     private enum Shape { case capsule, recordingCapsule, splitRecording, spurredRecordingBubble, rectangle, circle, absent }
     private enum HeaderBackground { case plain, textured, photographic, dimPhotographic, unboundedShadow }
-    private enum FullScreenPair { case recording, unmarked, unmarkedCircle, bareRedDot, uncertainCircleEdge, inContent, foregroundGlyph, thinDivider }
+    private enum FullScreenPair { case recording, joinedRecording, unmarked, unmarkedCircle, bareRedDot, uncertainCircleEdge, inContent, foregroundGlyph, thinDivider }
 
     /// All coordinates are native pixels measured from the top-left.
     private static func makeHeader(width: Int = 1206, height: Int = 2622,
@@ -47,7 +47,8 @@ struct StatusBarCropCheck {
                                    shape: Shape = .capsule,
                                    dark: Bool = false, scale: CGFloat = 1,
                                    background: HeaderBackground = .plain,
-                                   fullScreenPair: FullScreenPair? = nil) throws -> CGImage {
+                                   fullScreenPair: FullScreenPair? = nil,
+                                   statusContrast: CGFloat = 1) throws -> CGImage {
         guard let context = CGContext(data: nil, width: width, height: height,
             bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw CheckError.image }
@@ -107,7 +108,7 @@ struct StatusBarCropCheck {
             }
         }
         if let clockTop {
-            let statusColor = CGColor(gray: dark || background != .plain ? 1 : 0, alpha: 1)
+            let statusColor = CGColor(gray: dark || background != .plain ? statusContrast : 1 - statusContrast, alpha: 1)
             drawText("09:41", at: CGPoint(x: 78 * scale, y: clockTop), size: 52 * scale,
                      color: statusColor, in: context)
             context.setFillColor(statusColor)
@@ -147,6 +148,10 @@ struct StatusBarCropCheck {
             cornerHeight: 54 * scale, transform: nil))
         context.fillPath()
         if variant != .bareRedDot { context.fillEllipse(in: circle) }
+        if variant == .joinedRecording {
+            context.fill(CGRect(x: main.maxX - 7 * scale, y: y + 42 * scale,
+                width: 34 * scale, height: 24 * scale))
+        }
         if variant == .uncertainCircleEdge {
             context.fill(CGRect(x: circle.midX - 20 * scale, y: y + 92 * scale,
                 width: 40 * scale, height: 84 * scale))
@@ -157,7 +162,8 @@ struct StatusBarCropCheck {
         context.setFillColor(CGColor(red: 0.62, green: 0.24, blue: 0.18, alpha: 1))
         context.fillEllipse(in: mainMark)
         context.setFillColor(black)
-        context.fillEllipse(in: mainMark.insetBy(dx: 15 * scale, dy: 15 * scale))
+        // Leave a dark center after JPEG compression and detector downsampling.
+        context.fillEllipse(in: mainMark.insetBy(dx: 8 * scale, dy: 8 * scale))
         guard variant != .unmarkedCircle else { return }
         let circleMark = CGRect(x: circle.midX - 26 * scale, y: circle.midY - 26 * scale,
             width: 52 * scale, height: 52 * scale)
@@ -478,6 +484,7 @@ struct StatusBarCropCheck {
         try checkClocklessRecordingIntegration(in: root.appendingPathComponent("clockless-recording"))
         try checkExpandedPhotoOpeningIntegration(in: root.appendingPathComponent("expanded-photo-opening"))
         try checkLegacyMaskedOpening(in: root.appendingPathComponent("legacy-masked-opening"))
+        try checkDetachedStatusPeerIntegration(in: root.appendingPathComponent("detached-status-peer"))
         try checkCapturedHeaderIntegration(in: root.appendingPathComponent("captured-header"))
         try checkHorizontalIntegration(in: root.appendingPathComponent("horizontal"))
         for (url, data) in originals {
@@ -564,7 +571,9 @@ struct StatusBarCropCheck {
         }
     }
 
-    private enum PhotoOpening: String { case sameViewport, changedNavigation, movedViewport, legacyMasked }
+    private enum PhotoOpening: String {
+        case sameViewport, changedNavigation, movedViewport, legacyMasked, weakerStatusPeer
+    }
 
     private static func checkExpandedPhotoOpeningIntegration(in root: URL) throws {
         let leftNav = CGRect(x: 30, y: 223, width: 79, height: 52)
@@ -677,6 +686,76 @@ struct StatusBarCropCheck {
                 "Recovery retains exposed app pixels between the compact cut and the matching edge")
         for (url, bytes) in originals {
             require(try Data(contentsOf: url) == bytes, "Legacy masked opening source JPEG bytes remain unchanged")
+        }
+    }
+
+    private static func checkDetachedStatusPeerIntegration(in root: URL) throws {
+        let bridge = CGRect(x: 793, y: 89, width: 16, height: 16)
+        let leftNav = CGRect(x: 30, y: 223, width: 79, height: 52)
+        for scenario in [PhotoOpening.sameViewport, .changedNavigation, .movedViewport, .weakerStatusPeer] {
+            let directory = root.appendingPathComponent(scenario.rawValue)
+            let offsets = scenario == .movedViewport ? [0, 137, 274, 411] : [0, 0, 137, 274]
+            let frames = try makeScrollFrames(in: directory.appendingPathComponent("frames"), status: true,
+                count: offsets.count, jpegQuality: 0.9, scrollOffsets: offsets,
+                photoOpening: scenario, joinedStatusOpening: true)
+            let originals = try frames.map { ($0, try Data(contentsOf: $0)) }
+            let opening = try readImage(frames[0]), peer = try readImage(frames[1])
+            guard let openingStatus = CaptureStatusBarDetector.presentation(in: opening, maximumBottom: 196),
+                  let peerStatus = CaptureStatusBarDetector.presentation(in: peer, maximumBottom: 196) else {
+                preconditionFailure("Both compact status presentations must qualify in \(scenario.rawValue)")
+            }
+            require(!openingStatus.hasDetachedRecordingBubble && peerStatus.hasDetachedRecordingBubble,
+                    "The recording circle is detached only in the candidate")
+            let weaker = scenario == .weakerStatusPeer ? peerStatus : openingStatus
+            let stronger = scenario == .weakerStatusPeer ? openingStatus : peerStatus
+            require(weaker.clockDetail > 0 && weaker.rightDetail > 0
+                    && weaker.clockDetail < stronger.clockDetail * 0.85
+                    && weaker.rightDetail < stronger.rightDetail * 0.85,
+                    "The synthetic clock and right indicators have different visible detail in \(scenario.rawValue)")
+            let body = CGRect(x: 0, y: 320, width: opening.width, height: 512)
+            require(nativePixelError(opening, rect: bridge, peer, rect: bridge) > 150,
+                    "The actual opening joins the recording shapes and the peer has a clear gap")
+            require((nativePixelError(opening, rect: body, peer, rect: body) == 0) == (scenario != .movedViewport),
+                    "The compact peer has matching captured body pixels only at the duplicate viewport")
+            require((nativePixelError(opening, rect: leftNav, peer, rect: leftNav) > 5) == (scenario == .changedNavigation),
+                    "The changed-navigation peer differs below the status band")
+
+            let on = try FrameStitcher(options: CaptureOptions(keepsStatusBar: true)).stitch(
+                frameURLs: frames, sessionURL: directory.appendingPathComponent("on"), topCropRatio: 0)
+            require(on.outputURLs.count == 1, "Compact status selection retains one complete native page")
+            let kept = try readImage(on.outputURLs[0])
+            require(kept.width == opening.width && kept.height == opening.height + offsets.last!,
+                    "ON retains native dimensions and every newly observed body row")
+            let verifiedPeer = scenario == .sameViewport
+            let source = verifiedPeer ? peer : opening
+            for (name, roi) in [("full top band", CGRect(x: 0, y: 0, width: source.width, height: 196)),
+                                ("clock", CGRect(x: 65, y: 60, width: 210, height: 90)),
+                                ("battery", CGRect(x: 990, y: 60, width: 175, height: 90)),
+                                ("left recording ring", CGRect(x: 340, y: 66, width: 58, height: 58)),
+                                ("right recording circle", CGRect(x: 811, y: 42, width: 116, height: 112)),
+                                ("bridge or gap", bridge)] {
+                require(nativePixelError(source, rect: roi, kept, rect: roi) < 5,
+                        "ON uses the actual captured \(name) from the \(verifiedPeer ? "detached peer" : "original opening") in \(scenario.rawValue)")
+            }
+            require(nativePixelError(opening, rect: leftNav, kept, rect: leftNav) < 5,
+                    "ON retains the original visible application navigation")
+            if verifiedPeer {
+                let cut = Int(CaptureStatusBarDetector.bottom(in: opening, maximumBottom: 196,
+                    allowsClocklessRecording: true) ?? 0)
+                let off = try FrameStitcher(options: CaptureOptions(keepsStatusBar: false)).stitch(
+                    frameURLs: frames, sessionURL: directory.appendingPathComponent("off"), topCropRatio: 0)
+                require(off.outputURLs.count == 1, "OFF retains one complete native page")
+                let cropped = try readImage(off.outputURLs[0])
+                require(cropped.width == opening.width && cropped.height == kept.height - cut,
+                        "OFF uses the existing crop boundary of the opening frame")
+                let sourceRows = CGRect(x: 0, y: cut, width: opening.width, height: 320 - cut)
+                require(nativePixelError(opening, rect: sourceRows, cropped,
+                        rect: sourceRows.offsetBy(dx: 0, dy: -CGFloat(cut))) < 5,
+                        "ON-only compact selection does not change the source pixels retained by OFF")
+            }
+            for (url, bytes) in originals {
+                require(try Data(contentsOf: url) == bytes, "Compact status peer source JPEG bytes remain unchanged")
+            }
         }
     }
 
@@ -951,7 +1030,7 @@ struct StatusBarCropCheck {
                                          background: HeaderBackground = .plain, indicator: Shape = .capsule,
                                          jpegQuality: CGFloat = 0.94, scrollOffsets: [Int]? = nil,
                                          transientOpening: Bool = false, fullScreenPair: FullScreenPair? = nil,
-                                         photoOpening: PhotoOpening? = nil) throws -> [URL] {
+                                         photoOpening: PhotoOpening? = nil, joinedStatusOpening: Bool = false) throws -> [URL] {
         precondition(scrollOffsets == nil || scrollOffsets?.count == count)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let format = UIGraphicsImageRendererFormat()
@@ -959,6 +1038,8 @@ struct StatusBarCropCheck {
         let top = floor(CGFloat(height) * 0.075), bottom = CGFloat(height) - ceil(CGFloat(height) * 0.19)
         let scale = CGFloat(width) / 1206
         let bodyStart = photoOpening == nil ? top : 320 * scale
+        let photoProfile = try joinedStatusOpening ? makeHeader(width: width, height: height,
+            clockTop: nil, shape: .absent, scale: scale, background: .dimPhotographic) : nil
         var random: UInt64 = 0x35a179c4
         let worldWidth = width + (axis == .horizontal ? count * 137 : 0)
         let worldHeight = height + (axis == .vertical ? count * 137 : 0)
@@ -981,14 +1062,23 @@ struct StatusBarCropCheck {
             // instead of the source selected for the beginning of a reverse capture.
             let temporalOffset = headerOffset + CGFloat(index * (axis == .vertical ? 2 : headerMovement))
             let scrollOffset = scrollOffsets?[index] ?? index * 137
-            let expandedPhoto = photoOpening != nil && index == 0
+            let expandedPhoto = photoOpening != nil && index == 0 && !joinedStatusOpening
+            let pair: FullScreenPair? = joinedStatusOpening ? (index == 0 ? .joinedRecording : .recording) : fullScreenPair
+            let weakerStatus = joinedStatusOpening && index == (photoOpening == .weakerStatusPeer ? 1 : 0)
             let header = try makeHeader(width: width, height: height,
                 clockTop: status && fullScreenPair == nil && !expandedPhoto ? CGFloat(72 + temporalOffset) * scale : nil,
                 capsuleTop: CGFloat(42 + temporalOffset) * scale,
                 shape: status && !expandedPhoto ? indicator : .absent, scale: scale, background: background,
-                fullScreenPair: fullScreenPair)
+                fullScreenPair: pair, statusContrast: weakerStatus ? 0.5 : 1)
             let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { context in
                 UIImage(cgImage: header).draw(at: .zero)
+                if let photoProfile {
+                    context.cgContext.saveGState()
+                    context.cgContext.clip(to: CGRect(x: 0, y: 180 * scale,
+                        width: CGFloat(width), height: 140 * scale))
+                    UIImage(cgImage: photoProfile).draw(at: .zero)
+                    context.cgContext.restoreGState()
+                }
                 context.cgContext.saveGState()
                 context.cgContext.clip(to: CGRect(x: 0, y: bodyStart, width: CGFloat(width), height: bottom - bodyStart))
                 world.draw(at: CGPoint(x: axis == .horizontal ? -CGFloat(scrollOffset) : 0,

@@ -1125,9 +1125,51 @@ final class FrameStitcher {
         }
         guard !coverage.isEmpty else { return [] }
         let recoversOpening = detectsStatusBar && options.axis == .vertical && !options.keepsStatusBar
+        let prefersClearStatus = detectsStatusBar && options.axis == .vertical && options.keepsStatusBar
         var replacements: [Int: (url: URL, cut: CGFloat)] = [:]
         var inspected = Set<Int>()
         var expanded: [Int: CGRect] = [:]
+
+        func openingCandidates(for frame: PositionedFrame) -> ArraySlice<Int> {
+            let positions = Dictionary(uniqueKeysWithValues: positioned.map { ($0.index, $0.offset) })
+            return observed.filter { index in
+                index != frame.index && samples[index].coveredTop == 0
+                    && (positions[index].map { $0 == frame.offset } ?? (abs(index - frame.index) <= 12))
+            }.sorted { abs($0 - frame.index) < abs($1 - frame.index) }.prefix(24)
+        }
+
+        func preferredStatusSource(for frame: PositionedFrame) -> URL? {
+            guard prefersClearStatus,
+                  let opening = UIImage(contentsOfFile: samples[frame.index].url.path)?.cgImage,
+                  let original = CaptureStatusBarDetector.presentation(in: opening, maximumBottom: contentTop) else { return nil }
+            var bestSource: URL?
+            var bestDetail = 0.0
+            for index in openingCandidates(for: frame) {
+                let source = samples[index].url
+                let detail: Double? = autoreleasepool {
+                    guard let candidate = UIImage(contentsOfFile: source.path)?.cgImage,
+                          let status = CaptureStatusBarDetector.presentation(in: candidate, maximumBottom: contentTop),
+                          status.hasDetachedRecordingBubble,
+                          status.clockDetail > 0, status.rightDetail > 0 else { return nil }
+                    let clock = status.clockDetail / max(original.clockDetail, 0.000001)
+                    let right = status.rightDetail / max(original.rightDetail, 0.000001)
+                    let statusBottom = max(original.bottom, status.bottom)
+                    guard min(clock, right) >= 0.95,
+                          !original.hasDetachedRecordingBubble || max(clock, right) >= 1.15,
+                          clock + right > bestDetail,
+                          CaptureStatusBarDetector.preservesBatteryDetail(opening, candidate, statusBottom: statusBottom),
+                          SameOpeningViewport.isSameViewport(opening, candidate,
+                              statusBottom: statusBottom, contentTop: contentTop, contentBottom: contentBottom),
+                          CaptureStatusBarDetector.bottom(in: candidate, maximumBottom: statusBottom) != nil else { return nil }
+                    return clock + right
+                }
+                if let detail {
+                    bestSource = source
+                    bestDetail = detail
+                }
+            }
+            return bestSource
+        }
 
         func recoveredSource(for frame: PositionedFrame, sourceTop: CGFloat) throws -> (url: URL, cut: CGFloat)? {
             guard recoversOpening, sourceTop < CaptureOverlayDetector.expandedIslandSearchDepth(width: width) else { return nil }
@@ -1142,14 +1184,9 @@ final class FrameStitcher {
                 expanded[frame.index] = occlusion
                 guard let occlusion, occlusion.maxY > sourceTop else { return nil }
 
-                let positions = Dictionary(uniqueKeysWithValues: positioned.map { ($0.index, $0.offset) })
-                let candidates = observed.filter { index in
-                    index != frame.index && samples[index].coveredTop == 0
-                        && (positions[index].map { $0 == frame.offset } ?? (abs(index - frame.index) <= 12))
-                }.sorted { abs($0 - frame.index) < abs($1 - frame.index) }
                 // Only a bounded number of native comparisons can run while
                 // the app is processing in the background.
-                for index in candidates.prefix(24) {
+                for index in openingCandidates(for: frame) {
                     let source = samples[index].url
                     let cut: CGFloat? = autoreleasepool {
                         guard let candidate = UIImage(contentsOfFile: source.path)?.cgImage,
@@ -1185,10 +1222,14 @@ final class FrameStitcher {
         var pieces: [Piece] = []
         var cursor = first.start
         var last = first
+        var preferredOpeningURL: URL?
         if first.start == first.frame.offset, outputTop < contentTop {
             let recovered = try recoveredSource(for: first.frame, sourceTop: outputTop)
             if recovered != nil || samples[first.frame.index].coveredTop <= outputTop {
-                let source = recovered?.url ?? samples[first.frame.index].url
+                // Use the chosen original frame for both the prefix and its
+                // body rows. Status pixels are never pasted from a separate view.
+                preferredOpeningURL = preferredStatusSource(for: first.frame)
+                let source = recovered?.url ?? preferredOpeningURL ?? samples[first.frame.index].url
                 var prefixTop = outputTop
                 // Zero means no externally supplied boundary. Inspect the
                 // actual selected JPEG for the removable compact status band.
@@ -1212,7 +1253,8 @@ final class FrameStitcher {
             guard item.end > cursor else { continue }
             let sourceTop = contentTop + CGFloat(cursor - item.frame.offset)
             let recovered = try recoveredSource(for: item.frame, sourceTop: sourceTop)
-            pieces.append(Piece(frameURL: recovered?.url ?? samples[item.frame.index].url, sourceRect: CGRect(
+            let preferred = item.frame.index == first.frame.index ? preferredOpeningURL : nil
+            pieces.append(Piece(frameURL: recovered?.url ?? preferred ?? samples[item.frame.index].url, sourceRect: CGRect(
                 x: 0, y: sourceTop,
                 width: width, height: CGFloat(item.end - cursor)
             )))
@@ -2201,12 +2243,22 @@ private enum HorizontalScrollMatcher {
 /// separate from activity occlusion: a normal compact pill is usable input.
 /// Unknown layouts retain their pixels. Never infer another app's safe area.
 enum CaptureStatusBarDetector {
+    struct Presentation {
+        let hasDetachedRecordingBubble: Bool
+        let bottom: CGFloat
+        let clockDetail: Double
+        let rightDetail: Double
+    }
+
     private struct Capsule {
         let band: Int
         let top: CGFloat
         let bottom: CGFloat
         let padding: CGFloat
         let isClocklessRecording: Bool
+        let left: CGFloat
+        let right: CGFloat
+        let hasDetachedRecordingBubble: Bool
     }
 
     private static func capsule(in image: CGImage, maximumBottom: CGFloat,
@@ -2390,17 +2442,23 @@ enum CaptureStatusBarDetector {
             }) else { return nil }
             let bottom = max(main.high, bubbles.first?.high ?? main.high)
             let scaleY = CGFloat(band) / CGFloat(height)
+            let scaleX = nativeWidth / CGFloat(width)
             let nativeBottom = CGFloat(bottom + 1) * scaleY
-            let padding = max(2, nativeWidth / CGFloat(width))
+            let padding = max(2, scaleX)
             let cut = ceil(nativeBottom + padding)
             guard cut <= maximumBottom else { return nil }
+            let hasDetachedRecordingBubble = bubbles.first != nil
+                && recordingMark(in: main, darkCenter: true, allowRingEdgeSamples: true)
             let isClocklessRecording = allowsClocklessRecording && (bubbles.first.map { bubble in
                 recordingMark(in: main, darkCenter: true, allowRingEdgeSamples: true)
                     && markedBubbles.contains { bubble.enclosesCenteredCore($0) }
                     && hasQuietSurround(main: main, bubble: bubble, cut: Int(cut))
             } ?? false)
             return Capsule(band: band, top: CGFloat(main.low) * scaleY,
-                bottom: nativeBottom, padding: padding, isClocklessRecording: isClocklessRecording)
+                bottom: nativeBottom, padding: padding, isClocklessRecording: isClocklessRecording,
+                left: CGFloat(main.left) * scaleX,
+                right: CGFloat(max(main.right, bubbles.first?.right ?? main.right) + 1) * scaleX,
+                hasDetachedRecordingBubble: hasDetachedRecordingBubble)
         }
         // Preserve the original neutral-background route. Photography requires
         // stricter black geometry plus recording-ring evidence and local contrast.
@@ -2412,6 +2470,155 @@ enum CaptureStatusBarDetector {
     static func capsuleBottom(in image: CGImage, maximumBottom: CGFloat) -> CGFloat? {
         guard let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
         return ceil(evidence.bottom + evidence.padding)
+    }
+
+    /// Compare original status bands only after the caller has matched the viewport.
+    /// The scores describe visible edge detail in the native clock and battery lanes.
+    static func presentation(in image: CGImage, maximumBottom: CGFloat) -> Presentation? {
+        guard image.width <= 4096, let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
+        let width = CGFloat(image.width)
+        let middle = (evidence.top + evidence.bottom) / 2
+        let half = min((evidence.bottom - evidence.top) * 0.44, width * 0.041)
+        let top = floor(middle - half), bottom = ceil(middle + half)
+        func detail(from left: CGFloat, to right: CGFloat, minimumSpan: CGFloat) -> Double {
+            let x = ceil(left), end = floor(right)
+            guard end > x else { return 0 }
+            return statusLaneDetail(in: image, rect: CGRect(x: x, y: top, width: end - x, height: bottom - top),
+                                    minimumSpan: Int(ceil(minimumSpan)))
+        }
+        let clock = detail(from: width * 0.045, to: min(width * 0.25, evidence.left - width * 0.012),
+                           minimumSpan: width * 0.035)
+        let right = detail(from: max(width * 0.84, evidence.right + width * 0.018), to: width * 0.965,
+                           minimumSpan: width * 0.024)
+        return Presentation(hasDetachedRecordingBubble: evidence.hasDetachedRecordingBubble,
+            bottom: ceil(evidence.bottom + evidence.padding), clockDetail: clock, rightDetail: right)
+    }
+
+    private static func statusLaneDetail(in image: CGImage, rect: CGRect, minimumSpan: Int) -> Double {
+        let width = Int(rect.width), height = Int(rect.height)
+        let reach = max(1, Int(round(Double(image.width) / 600)))
+        guard width > reach * 2 + 1, height > reach * 2 + 1,
+              let pixels = statusPixels(in: image, rect: rect, width: width, height: height,
+                                        interpolation: .none) else { return 0 }
+        let stride = width * 4
+        func edge(at index: Int, step: Int) -> Int {
+            var strongest = 0
+            for channel in 0..<3 {
+                let p = index + channel
+                let gradient = Int(pixels[p + step]) - Int(pixels[p])
+                let contrast = Int(pixels[p + (reach + 1) * step]) - Int(pixels[p - reach * step])
+                // A real local step changes in the same direction at both scales.
+                if abs(gradient) >= 10, abs(contrast) >= 30, gradient * contrast > 0 {
+                    strongest = max(strongest, abs(gradient))
+                }
+            }
+            return strongest
+        }
+        var horizontal = [Int](repeating: 0, count: 256), vertical = horizontal
+        var horizontalCount = 0, verticalCount = 0
+        var left = width, right = 0, top = height, bottom = 0
+        for y in reach..<(height - reach - 1) {
+            for x in reach..<(width - reach - 1) {
+                let index = y * stride + x * 4
+                let h = edge(at: index, step: 4), v = edge(at: index, step: stride)
+                if h > 0 { horizontal[h] += 1; horizontalCount += 1 }
+                if v > 0 { vertical[v] += 1; verticalCount += 1 }
+                if h > 0 || v > 0 {
+                    left = min(left, x); right = max(right, x)
+                    top = min(top, y); bottom = max(bottom, y)
+                }
+            }
+        }
+        let minimumEdges = max(12, image.width / 32)
+        guard horizontalCount >= minimumEdges, verticalCount >= minimumEdges,
+              right - left >= minimumSpan, bottom - top >= max(4, image.width / 100) else { return 0 }
+        func upperDetail(_ histogram: [Int], count: Int) -> Int {
+            let target = (count * 85 + 99) / 100
+            var seen = 0
+            for value in 1..<histogram.count {
+                seen += histogram[value]
+                if seen >= target { return value }
+            }
+            return 0
+        }
+        return sqrt(Double(upperDetail(horizontal, count: horizontalCount)
+            * upperDetail(vertical, count: verticalCount))) / 255
+    }
+
+    private static func statusPixels(in image: CGImage, rect: CGRect, width: Int, height: Int,
+                                     interpolation: CGInterpolationQuality) -> [UInt8]? {
+        guard let strip = image.cropping(to: rect) else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.interpolationQuality = interpolation
+            context.draw(strip, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return rendered ? pixels : nil
+    }
+
+    /// Compare the fixed rightmost indicator, independently of the wider lane's
+    /// edge score. A noisy or changing background cannot stand in for a battery.
+    static func preservesBatteryDetail(_ opening: CGImage, _ candidate: CGImage, statusBottom: CGFloat) -> Bool {
+        let width = CGFloat(opening.width)
+        guard opening.width == candidate.width, opening.height == candidate.height,
+              statusBottom.isFinite, statusBottom >= width * 0.08, statusBottom <= width * 0.18 else { return false }
+        let rect = CGRect(x: floor(width * 0.845), y: floor(statusBottom - width * 0.078),
+            width: ceil(width * 0.113), height: ceil(width * 0.062))
+        guard rect.maxY <= CGFloat(opening.height),
+              let before = batteryFeature(in: opening, rect: rect),
+              let after = batteryFeature(in: candidate, rect: rect),
+              abs(before.box.midX - after.box.midX) <= 3,
+              abs(before.box.midY - after.box.midY) <= 2 else { return false }
+        let overlap = before.pixels.reduce(0) { $0 + (after.pixels.contains($1) ? 1 : 0) }
+        let combined = before.pixels.count + after.pixels.count - overlap
+        return overlap * 100 >= min(before.pixels.count, after.pixels.count) * 68
+            && overlap * 100 >= combined * 48
+    }
+
+    private static func batteryFeature(in image: CGImage, rect: CGRect) -> (box: CGRect, pixels: Set<Int>)? {
+        // Analyze a low-frequency silhouette so a softened but authentic icon
+        // can match its sharper rendition. The original pixels are untouched.
+        let width = 46, height = 26
+        guard let pixels = statusPixels(in: image, rect: rect, width: width, height: height,
+                                        interpolation: .medium) else { return nil }
+        let indices = 0..<(width * height)
+        let border = indices.filter { i in i / width < 2 || i / width >= height - 2 || i % width == 0 || i % width == width - 1 }
+        let background = (0..<3).map { channel in border.map { Int(pixels[$0 * 4 + channel]) }.sorted()[border.count / 2] }
+        let contrast = indices.map { i in (0..<3).map { abs(Int(pixels[i * 4 + $0]) - background[$0]) }.max() ?? 0 }
+        guard border.filter({ contrast[$0] <= 24 }).count * 100 >= border.count * 85 else { return nil }
+        var remaining = contrast.map { $0 >= 28 }
+        var feature: (box: CGRect, pixels: Set<Int>)?
+        for start in indices where remaining[start] {
+            var queue = [start], cursor = 0
+            remaining[start] = false
+            var left = start % width, right = left, top = start / width, bottom = top
+            var rowCounts = [Int](repeating: 0, count: height)
+            while cursor < queue.count {
+                let i = queue[cursor]; cursor += 1
+                let x = i % width, y = i / width
+                left = min(left, x); right = max(right, x)
+                top = min(top, y); bottom = max(bottom, y)
+                rowCounts[y] += 1
+                for (xx, yy) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                    where xx >= 0 && xx < width && yy >= 0 && yy < height {
+                    let next = yy * width + xx
+                    if remaining[next] { remaining[next] = false; queue.append(next) }
+                }
+            }
+            let w = right - left + 1, h = bottom - top + 1
+            guard left >= 2, right < width - 2, top >= 2, bottom < height - 2,
+                  (16...34).contains(w), (7...18).contains(h), w * 10 >= h * 14, w <= h * 4,
+                  (24...62).contains(left + right), queue.count * 100 >= w * h * 34,
+                  max(rowCounts[top], rowCounts[top + 1], rowCounts[top + 2]) * 100 >= w * 55,
+                  max(rowCounts[bottom], rowCounts[bottom - 1], rowCounts[bottom - 2]) * 100 >= w * 55 else { continue }
+            guard feature == nil else { return nil }
+            feature = (CGRect(x: left, y: top, width: w, height: h), Set(queue))
+        }
+        return feature
     }
 
     static func bottom(in image: CGImage, maximumBottom: CGFloat, allowsClocklessRecording: Bool = false) -> CGFloat? {
@@ -2698,8 +2905,7 @@ private enum SameOpeningViewport {
                                occlusion: CGRect, contentTop: CGFloat, contentBottom: CGFloat) -> Bool {
         let width = covered.width
         let height = covered.height
-        guard width == candidate.width, height == candidate.height,
-              width >= 200, width <= 4096, height > 0, width <= 16_000_000 / height,
+        guard hasComparableGeometry(covered, candidate),
               [occlusion.minX, occlusion.minY, occlusion.maxX, occlusion.maxY,
                contentTop, contentBottom].allSatisfy(\.isFinite),
               !occlusion.isEmpty, occlusion.minX >= 0, occlusion.maxX <= CGFloat(width),
@@ -2714,7 +2920,41 @@ private enum SameOpeningViewport {
         let leftEnd = Int(floor(occlusion.minX)) - halo
         let rightStart = Int(ceil(occlusion.maxX)) + halo
         guard lastRow - bodyStart >= 128, leftEnd >= halo, width - rightStart >= halo else { return false }
+        return compare(covered, candidate, firstRow: firstRow, lastRow: lastRow, bodyStart: bodyStart,
+                       navigationColumns: [0..<leftEnd, rightStart..<width])
+    }
 
+    static func isSameViewport(_ covered: CGImage, _ candidate: CGImage,
+                               statusBottom: CGFloat, contentTop: CGFloat, contentBottom: CGFloat) -> Bool {
+        let width = covered.width
+        guard hasComparableGeometry(covered, candidate),
+              [statusBottom, contentTop, contentBottom].allSatisfy(\.isFinite),
+              statusBottom > 0, statusBottom <= contentTop, contentTop < contentBottom,
+              contentBottom <= CGFloat(covered.height) else { return false }
+
+        // Both compact status bars end above the navigation. Compare the full
+        // width across that band, including titles between the side controls.
+        let firstRow = Int(ceil(statusBottom))
+        let navigationTop = Int(ceil(contentTop))
+        let lastRow = Int(floor(contentBottom))
+        let navigationDepth = max(32, Int(ceil(CGFloat(width) * 0.12)))
+        let bodyStart = min(lastRow - 128, navigationTop + navigationDepth)
+        guard bodyStart - navigationTop >= 32 else { return false }
+        return compare(covered, candidate, firstRow: firstRow, lastRow: lastRow, bodyStart: bodyStart,
+                       navigationColumns: [0..<width])
+    }
+
+    private static func hasComparableGeometry(_ covered: CGImage, _ candidate: CGImage) -> Bool {
+        let width = covered.width
+        let height = covered.height
+        return width == candidate.width && height == candidate.height
+            && width >= 200 && width <= 4096 && height > 0 && width <= 16_000_000 / height
+    }
+
+    private static func compare(_ covered: CGImage, _ candidate: CGImage,
+                                firstRow: Int, lastRow: Int, bodyStart: Int,
+                                navigationColumns: [Range<Int>]) -> Bool {
+        let width = covered.width
         let rowBytes = width * 4
         let rows = lastRow - firstRow
         let rect = CGRect(x: 0, y: firstRow, width: width, height: rows)
@@ -2741,11 +2981,11 @@ private enum SameOpeningViewport {
 
         // Check every exposed navigation pixel so a thin icon is not skipped by sampling.
         let firstBodyRow = bodyStart - firstRow
-        for side in [0..<leftEnd, rightStart..<width] {
+        for columns in navigationColumns {
             for top in stride(from: 0, to: firstBodyRow, by: 16) {
-                for left in stride(from: side.lowerBound, to: side.upperBound, by: 16) {
+                for left in stride(from: columns.lowerBound, to: columns.upperBound, by: 16) {
                     let bottom = min(top + 16, firstBodyRow)
-                    let right = min(left + 16, side.upperBound)
+                    let right = min(left + 16, columns.upperBound)
                     let count = (bottom - top) * (right - left)
                     var total = 0
                     var changed = 0
