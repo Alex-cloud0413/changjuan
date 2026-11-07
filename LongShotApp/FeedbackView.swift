@@ -9,19 +9,18 @@ struct FeedbackView: View {
     @Environment(\.appLanguage) private var language
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
-    @Environment(\.scenePhase) private var scenePhase
     @FocusState private var isEditingDescription: Bool
     @State private var issueDescription = ""
     @State private var includesDiagnostics = false
-    @State private var canUseMailComposer = true
-    @State private var showsCopyFallback = false
+    @State private var canUseMailComposer = false
+    @State private var isChoosingMailApp = false
+    @State private var mailHandoffs: [FeedbackMailHandoff] = []
     @State private var notice: String?
     @State private var mailDraft: FeedbackMailDraft?
 
     private static let supportAddress = "wenshang017@gmail.com"
 
     var body: some View {
-        let copyBeforeOpening = requiresClipboardHandoff
         NavigationStack {
             Form {
                 Section {
@@ -53,20 +52,16 @@ struct FeedbackView: View {
                     Text(language.text("仅附加可查看的诊断文本，不附加录制画面或照片。"))
                 }
                 Section {
-                    Button(language.text(copyBeforeOpening ? "拷贝正文并打开邮件" : "继续到邮件")) {
-                        prepareEmail(copyBeforeOpening: copyBeforeOpening)
-                    }
-                    .accessibilityIdentifier("feedback.continueToEmail")
-                    .disabled(trimmedDescription.isEmpty)
-                    if !canUseMailComposer || showsCopyFallback {
-                        Button(language.text("拷贝反馈正文"), action: copyFeedback)
-                            .accessibilityIdentifier("feedback.copyText")
-                            .disabled(trimmedDescription.isEmpty)
-                        LabeledContent(language.text("收件人"), value: Self.supportAddress)
-                            .textSelection(.enabled)
-                    }
+                    Button(language.text("选择邮件 App"), action: chooseMailApp)
+                        .accessibilityIdentifier("feedback.continueToEmail")
+                        .disabled(trimmedDescription.isEmpty)
+                    Button(language.text("拷贝反馈正文"), action: copyFeedback)
+                        .accessibilityIdentifier("feedback.copyText")
+                        .disabled(trimmedDescription.isEmpty)
+                    LabeledContent(language.text("收件人"), value: Self.supportAddress)
+                        .textSelection(.enabled)
                 } footer: {
-                    Text(language.text(copyBeforeOpening ? "打开邮件后，请粘贴已拷贝的正文，再确认发送。" : "请在邮件中确认发送。"))
+                    Text(language.text("请在邮件中确认发送。"))
                 }
                 if let notice {
                     Section {
@@ -84,12 +79,19 @@ struct FeedbackView: View {
                     Button(language.text("关闭")) { dismiss() }
                 }
             }
-        }
-        .onAppear {
-            canUseMailComposer = MFMailComposeViewController.canSendMail()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active { canUseMailComposer = MFMailComposeViewController.canSendMail() }
+            .confirmationDialog(language.text("选择邮件 App"), isPresented: $isChoosingMailApp, titleVisibility: .visible) {
+                if canUseMailComposer {
+                    Button(language.text("Apple 邮件（在长卷内撰写）"), action: openAppleMail)
+                }
+                ForEach(mailHandoffs) { handoff in
+                    Button(handoffTitle(handoff)) { openEmail(handoff) }
+                }
+                Button(language.text("取消"), role: .cancel) {}
+            } message: {
+                if mailHandoffs.contains(where: { $0.bodyToCopy != nil }) {
+                    Text(language.text("选择拷贝正文的选项后，请在邮件中粘贴。"))
+                }
+            }
         }
         .interactiveDismissDisabled(!trimmedDescription.isEmpty)
         .sheet(item: $mailDraft) { draft in
@@ -108,38 +110,49 @@ struct FeedbackView: View {
                           body: trimmedDescription, diagnostics: includesDiagnostics ? diagnostics : nil)
     }
 
-    private var requiresClipboardHandoff: Bool {
-        !canUseMailComposer && !trimmedDescription.isEmpty && draft.mailtoURL(diagnosticsLabel: language.text("诊断信息")) == nil
-    }
-
-    private func prepareEmail(copyBeforeOpening: Bool) {
+    private func chooseMailApp() {
         let draft = draft
         guard !draft.body.isEmpty else { return }
         isEditingDescription = false
-        notice = nil
         canUseMailComposer = MFMailComposeViewController.canSendMail()
-        if canUseMailComposer {
-            mailDraft = draft
-            return
+        mailHandoffs = FeedbackMailClient.allCases.compactMap { client in
+            // iOS exposes a scheme check for specific clients, not a list of mail apps.
+            guard let handoff = draft.externalHandoff(to: client, diagnosticsLabel: language.text("诊断信息")),
+                  client == .systemDefault || UIApplication.shared.canOpenURL(handoff.url) else { return nil }
+            return handoff
         }
-        if let url = draft.mailtoURL(diagnosticsLabel: language.text("诊断信息")) {
-            openEmail(url, copiedBody: false)
-            return
-        }
-        guard copyBeforeOpening, let url = draft.addressedMailtoURL() else {
-            showNotice("正文较长，请选择拷贝正文并打开邮件。")
-            return
-        }
-        copyBody(of: draft)
-        showNotice("已拷贝正文，请在邮件中粘贴。")
-        openEmail(url, copiedBody: true)
+        isChoosingMailApp = true
     }
 
-    private func openEmail(_ url: URL, copiedBody: Bool) {
-        openURL(url) { accepted in
+    private func handoffTitle(_ handoff: FeedbackMailHandoff) -> String {
+        let name: String
+        switch handoff.client {
+        case .systemDefault: name = language.text("默认邮件 App")
+        case .gmail: name = "Gmail"
+        case .outlook: name = "Outlook"
+        }
+        return handoff.bodyToCopy == nil ? name : language.format("拷贝正文并打开%@", name)
+    }
+
+    private func openAppleMail() {
+        guard MFMailComposeViewController.canSendMail() else {
+            showNotice("Apple 邮件尚未配置，请选择其他邮件 App。")
+            return
+        }
+        notice = nil
+        mailDraft = draft
+    }
+
+    private func openEmail(_ handoff: FeedbackMailHandoff) {
+        notice = nil
+        if let text = handoff.bodyToCopy {
+            copyBody(text)
+            showNotice("已拷贝正文，请在邮件中粘贴。")
+        }
+        openURL(handoff.url) { accepted in
             if !accepted {
-                showNotice(copiedBody ? "无法打开邮件 App。正文已拷贝，可在其他邮件 App 中粘贴。"
-                                      : "无法打开邮件 App，请拷贝反馈正文后手动发送。")
+                showNotice(handoff.bodyToCopy != nil ? "无法打开邮件 App。正文已拷贝，可在其他邮件 App 中粘贴。"
+                                                      : "无法打开邮件 App，请拷贝反馈正文后手动发送。")
             }
         }
     }
@@ -148,12 +161,11 @@ struct FeedbackView: View {
         let draft = draft
         guard !draft.body.isEmpty else { return }
         isEditingDescription = false
-        copyBody(of: draft)
+        copyBody(draft.inlineBody(diagnosticsLabel: language.text("诊断信息")))
         showNotice("已拷贝反馈正文。")
     }
 
-    private func copyBody(of draft: FeedbackMailDraft) {
-        let text = draft.inlineBody(diagnosticsLabel: language.text("诊断信息"))
+    private func copyBody(_ text: String) {
         UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: text]], options: [.localOnly: true])
     }
 
@@ -173,7 +185,6 @@ struct FeedbackView: View {
     }
 
     private func reportMailFailure() {
-        showsCopyFallback = true
         showNotice("邮件未发送，可拷贝反馈正文后重试。")
     }
 

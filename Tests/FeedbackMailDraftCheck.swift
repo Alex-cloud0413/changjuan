@@ -15,6 +15,9 @@ struct FeedbackMailDraftCheck {
         precondition(draft.inlineBody(diagnosticsLabel: label) == inline)
         checkFullURL(draft, expectedSubject: subject, expectedBody: inline)
         precondition(draft.addressedMailtoURL()?.absoluteString == addressed)
+        checkDefaultHandoff(draft, bodyToCopy: nil)
+        checkNamedHandoffs(draft, bodyToCopy: inline,
+                          encodedHeaders: "to=support%40example.invalid&subject=%E9%95%BF%E5%8D%B7%E9%97%AE%E9%A2%98%E5%8F%8D%E9%A6%88")
 
         let subjectWithDelimiters = "问题 + &cc=other@example.invalid"
         let delimiterDraft = FeedbackMailDraft(recipient: recipient, subject: subjectWithDelimiters,
@@ -32,19 +35,54 @@ struct FeedbackMailDraftCheck {
         precondition(oversizedBody.mailtoURL(diagnosticsLabel: label) == nil)
         precondition(oversizedBody.inlineBody(diagnosticsLabel: label) == longChinese)
         precondition(oversizedBody.addressedMailtoURL()?.absoluteString == addressed)
+        checkDefaultHandoff(oversizedBody, bodyToCopy: longChinese)
 
         let longReport = String(repeating: "report-token", count: 200)
         let oversizedReport = FeedbackMailDraft(recipient: recipient, subject: subject, body: body, diagnostics: longReport)
         precondition(oversizedReport.mailtoURL(diagnosticsLabel: label) == nil)
         precondition(oversizedReport.inlineBody(diagnosticsLabel: label) == "\(body)\n\n\(label)\n\(longReport)")
         precondition(oversizedReport.addressedMailtoURL()?.absoluteString == addressed)
+        checkDefaultHandoff(oversizedReport, bodyToCopy: "\(body)\n\n\(label)\n\(longReport)")
 
         let withoutReport = FeedbackMailDraft(recipient: recipient, subject: subject, body: body, diagnostics: nil)
         checkFullURL(withoutReport, expectedSubject: subject, expectedBody: body)
         precondition(withoutReport.inlineBody(diagnosticsLabel: label) == body)
         precondition(withoutReport.addressedMailtoURL()?.absoluteString == addressed)
+        checkDefaultHandoff(withoutReport, bodyToCopy: nil)
 
-        print("Feedback email draft checks passed: Unicode round-trip, delimiter safety, length cap, and body-free fallback.")
+        let namedWithoutReport = FeedbackMailDraft(recipient: "support+longshot@example.invalid",
+                                                   subject: subjectWithDelimiters, body: body, diagnostics: nil)
+        checkNamedHandoffs(namedWithoutReport, bodyToCopy: body,
+                          encodedHeaders: "to=support%2Blongshot%40example.invalid&subject=%E9%97%AE%E9%A2%98%20%2B%20%26cc%3Dother%40example.invalid")
+
+        print("Feedback email draft checks passed: Unicode, length cap, and body-free Gmail and Outlook handoffs with opt-in diagnostics.")
+    }
+
+    private static func checkDefaultHandoff(_ draft: FeedbackMailDraft, bodyToCopy: String?) {
+        guard let handoff = draft.externalHandoff(to: .systemDefault, diagnosticsLabel: label) else {
+            fatalError("Expected system default handoff")
+        }
+        precondition(handoff.client == .systemDefault)
+        precondition(handoff.url == (bodyToCopy == nil ? draft.mailtoURL(diagnosticsLabel: label) : draft.addressedMailtoURL()))
+        precondition(handoff.bodyToCopy == bodyToCopy)
+    }
+
+    private static func checkNamedHandoffs(_ draft: FeedbackMailDraft, bodyToCopy: String, encodedHeaders: String) {
+        let routes: [(FeedbackMailClient, String)] = [(.gmail, "googlegmail:/co?"), (.outlook, "ms-outlook://compose?")]
+        for (client, prefix) in routes {
+            guard let handoff = draft.externalHandoff(to: client, diagnosticsLabel: label),
+                  let components = URLComponents(url: handoff.url, resolvingAgainstBaseURL: false) else {
+                fatalError("Expected named mail client handoff")
+            }
+            precondition(handoff.client == client)
+            precondition(handoff.url.absoluteString == prefix + encodedHeaders)
+            precondition(components.fragment == nil)
+            precondition(components.queryItems == [
+                URLQueryItem(name: "to", value: draft.recipient),
+                URLQueryItem(name: "subject", value: draft.subject)
+            ])
+            precondition(handoff.bodyToCopy == bodyToCopy)
+        }
     }
 
     private static func checkFullURL(_ draft: FeedbackMailDraft, expectedSubject: String, expectedBody: String) {

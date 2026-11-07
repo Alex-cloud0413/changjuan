@@ -61,7 +61,7 @@ final class FeedbackUICheck: XCTestCase {
         XCTAssertTrue(feedback.waitForExistence(timeout: 5), "Closing feedback returns to Settings")
     }
 
-    func testLongBodyCopiesAndHandsOffToMail() {
+    func testMailChooserCancelPreservesDraftAndDefaultHandsOffLongBody() {
         let app = XCUIApplication(bundleIdentifier: "com.gaoyiming.longshot.private")
         app.launchArguments = ["-longshot.hasCompletedUsageGuide.v1", "YES"]
         app.launch()
@@ -73,15 +73,51 @@ final class FeedbackUICheck: XCTestCase {
         XCTAssertTrue(feedback.waitForExistence(timeout: 5))
         feedback.tap()
 
+        let includeDiagnostics = app.switches["feedback.includeDiagnostics"]
+        XCTAssertTrue(includeDiagnostics.waitForExistence(timeout: 5))
+        includeDiagnostics.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.5)).tap()
+        XCTAssertEqual(includeDiagnostics.value as? String, "1")
+
+        let body = "Synthetic feedback " + String(repeating: "?", count: 680)
         let description = app.descendants(matching: .any).matching(identifier: "feedback.description").firstMatch
         XCTAssertTrue(description.waitForExistence(timeout: 5))
         description.tap()
-        description.typeText("Synthetic feedback " + String(repeating: "?", count: 680))
+        description.typeText(body)
 
         let handoff = app.buttons["feedback.continueToEmail"]
         reveal(handoff, in: app)
-        XCTAssertTrue(["Copy body and open email", "拷贝正文并打开邮件"].contains(handoff.label))
+        XCTAssertTrue(["Choose mail app", "选择邮件 App"].contains(handoff.label))
+        let defaultMail = app.buttons.matching(NSPredicate(format: "label IN %@", [
+            "Copy body and open Default Mail App", "拷贝正文并打开默认邮件 App"
+        ])).firstMatch
+        let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["Cancel", "取消"])).firstMatch
+
         handoff.tap()
+        XCTAssertTrue(defaultMail.waitForExistence(timeout: 5))
+
+        let chooser = XCTAttachment(screenshot: app.screenshot())
+        chooser.name = "Feedback Mail Chooser"
+        chooser.lifetime = .keepAlways
+        add(chooser)
+
+        if cancel.exists {
+            cancel.tap()
+        } else {
+            // The popover form uses an outside tap in place of the Cancel button.
+            let dismissalY: CGFloat = defaultMail.frame.midY < app.frame.midY ? 0.90 : 0.15
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: dismissalY)).tap()
+        }
+        XCTAssertTrue(defaultMail.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(app.state, .runningForeground)
+        XCTAssertFalse(app.staticTexts["feedback.result"].exists, "Cancel leaves the draft without a handoff result")
+        for _ in 0..<4 where !description.isHittable { app.swipeDown() }
+        XCTAssertEqual(description.value as? String, body)
+        XCTAssertEqual(includeDiagnostics.value as? String, "1")
+
+        reveal(handoff, in: app)
+        handoff.tap()
+        XCTAssertTrue(defaultMail.waitForExistence(timeout: 5))
+        defaultMail.tap()
 
         // A simulator with no configured account can open Mail setup or reject the handoff.
         // Observe the handoff or its recovery message without sending anything.
