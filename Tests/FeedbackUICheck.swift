@@ -52,13 +52,48 @@ final class FeedbackUICheck: XCTestCase {
         copy.tap()
         let result = app.staticTexts["feedback.result"]
         XCTAssertTrue(result.waitForExistence(timeout: 5))
-        XCTAssertTrue(["Feedback text copied.", "已拷贝反馈文本。"].contains(result.label))
+        XCTAssertTrue(["Feedback body copied.", "已拷贝反馈正文。"].contains(result.label))
         XCTAssertEqual(app.state, .runningForeground)
 
         let close = app.navigationBars.buttons.matching(NSPredicate(format: "label IN %@", ["Close", "关闭"])).firstMatch
         XCTAssertTrue(close.exists)
         close.tap()
         XCTAssertTrue(feedback.waitForExistence(timeout: 5), "Closing feedback returns to Settings")
+    }
+
+    func testLongBodyCopiesAndHandsOffToMail() {
+        let app = XCUIApplication(bundleIdentifier: "com.gaoyiming.longshot.private")
+        app.launchArguments = ["-longshot.hasCompletedUsageGuide.v1", "YES"]
+        app.launch()
+
+        let settings = homeButton(in: app, id: "home.settings", labels: ["Settings", "设置"])
+        XCTAssertTrue(settings.waitForExistence(timeout: 15))
+        settings.tap()
+        let feedback = app.buttons["settings.feedback"]
+        XCTAssertTrue(feedback.waitForExistence(timeout: 5))
+        feedback.tap()
+
+        let description = app.descendants(matching: .any).matching(identifier: "feedback.description").firstMatch
+        XCTAssertTrue(description.waitForExistence(timeout: 5))
+        description.tap()
+        description.typeText("Synthetic feedback " + String(repeating: "?", count: 680))
+
+        let handoff = app.buttons["feedback.continueToEmail"]
+        reveal(handoff, in: app)
+        XCTAssertTrue(["Copy body and open email", "拷贝正文并打开邮件"].contains(handoff.label))
+        handoff.tap()
+
+        // A simulator with no configured account can open Mail setup or reject the handoff.
+        // Observe the handoff or its recovery message without sending anything.
+        let mail = XCUIApplication(bundleIdentifier: "com.apple.mobilemail")
+        let result = app.staticTexts["feedback.result"]
+        let handled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            if app.state != .runningForeground { return mail.state == .runningForeground }
+            guard result.exists else { return false }
+            return ["Couldn’t open a mail app. The body is copied and can be pasted into another mail app.",
+                    "无法打开邮件 App。正文已拷贝，可在其他邮件 App 中粘贴。"].contains(result.label)
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [handled], timeout: 10), .completed)
     }
 
     func testCaptureFailureFeedbackHasNoCaptureEvents() throws {

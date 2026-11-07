@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 
 // Run after the ordinary regressions on a test simulator with Mail unconfigured.
 // This installs the supplied simulator app and replaces its clipboard with synthetic text.
-// The test never opens a mail composer or sends a message.
+// The long-draft check attempts a mail handoff with synthetic text and never sends a message.
 const [simulatorFlag, simulator, appFlag, appPath, ...remaining] = process.argv.slice(2);
 assert.ok(simulatorFlag === '--simulator' && /^[0-9A-F-]{36}$/i.test(simulator ?? '')
   && appFlag === '--app' && appPath && remaining.length === 0,

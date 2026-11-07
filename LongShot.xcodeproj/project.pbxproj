@@ -14,6 +14,7 @@
 		B00000000000000000000003 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* AppModel.swift */; };
 		B00000000000000000000057 /* FeedbackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000057 /* FeedbackDiagnostics.swift */; };
 		B00000000000000000000058 /* FeedbackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000058 /* FeedbackView.swift */; };
+		B00000000000000000000059 /* FeedbackMailDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000059 /* FeedbackMailDraft.swift */; };
 		B00000000000000000000054 /* CaptureProcessingDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000054 /* CaptureProcessingDiagnostics.swift */; };
 		B00000000000000000000055 /* FramePreparationCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000055 /* FramePreparationCache.swift */; };
 		B00000000000000000000005 /* FrameStitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* FrameStitcher.swift */; };
@@ -73,6 +74,7 @@
 		C00000000000000000000003 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		C00000000000000000000057 /* FeedbackDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackDiagnostics.swift; sourceTree = "<group>"; };
 		C00000000000000000000058 /* FeedbackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackView.swift; sourceTree = "<group>"; };
+		C00000000000000000000059 /* FeedbackMailDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackMailDraft.swift; sourceTree = "<group>"; };
 		C00000000000000000000054 /* CaptureProcessingDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureProcessingDiagnostics.swift; sourceTree = "<group>"; };
 		C00000000000000000000055 /* FramePreparationCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FramePreparationCache.swift; sourceTree = "<group>"; };
 		C00000000000000000000005 /* FrameStitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameStitcher.swift; sourceTree = "<group>"; };
@@ -138,6 +140,7 @@
 				C00000000000000000000003 /* AppModel.swift */,
 				C00000000000000000000057 /* FeedbackDiagnostics.swift */,
 				C00000000000000000000058 /* FeedbackView.swift */,
+				C00000000000000000000059 /* FeedbackMailDraft.swift */,
 				C00000000000000000000054 /* CaptureProcessingDiagnostics.swift */,
 				C00000000000000000000055 /* FramePreparationCache.swift */,
 				C00000000000000000000032 /* UsageGuideView.swift */,
@@ -311,6 +314,7 @@
 				B00000000000000000000003 /* AppModel.swift in Sources */,
 				B00000000000000000000057 /* FeedbackDiagnostics.swift in Sources */,
 				B00000000000000000000058 /* FeedbackView.swift in Sources */,
+				B00000000000000000000059 /* FeedbackMailDraft.swift in Sources */,
 				B00000000000000000000054 /* CaptureProcessingDiagnostics.swift in Sources */,
 				B00000000000000000000055 /* FramePreparationCache.swift in Sources */,
 				B00000000000000000000033 /* UsageGuideView.swift in Sources */,
@@ -381,7 +385,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C00000000000000000000013 /* App.xcconfig */;
 			buildSettings = {
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 1.1.5;
@@ -395,7 +399,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C00000000000000000000013 /* App.xcconfig */;
 			buildSettings = {
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 1.1.5;
@@ -410,7 +414,7 @@
 			baseConfigurationReference = C0000000000000000000002B /* Widgets.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
 				MARKETING_VERSION = 1.1.5;
@@ -426,7 +430,7 @@
 			baseConfigurationReference = C0000000000000000000002B /* Widgets.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				GENERATE_INFOPLIST_FILE = NO;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
 				MARKETING_VERSION = 1.1.5;

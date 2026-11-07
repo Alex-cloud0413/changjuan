@@ -11,13 +11,13 @@
   <img src="https://img.shields.io/badge/platform-iOS%2027%2B-000000?logo=apple&logoColor=white" alt="Platform: iOS 27+">
   <img src="https://img.shields.io/badge/Swift-5.0-F05138?logo=swift&logoColor=white" alt="Swift 5.0">
   <img src="https://img.shields.io/badge/Xcode-27.1-147EFB?logo=xcode&logoColor=white" alt="Xcode 27.1">
-  <img src="https://img.shields.io/badge/version-1.1.5%20(Build%2057)-lightgrey" alt="Version 1.1.5 (Build 57)">
+  <img src="https://img.shields.io/badge/version-1.1.5%20(Build%2058)-lightgrey" alt="Version 1.1.5 (Build 58)">
 </p>
 
 <p align="center"><b>简体中文</b> · App 内支持中文 / English 界面切换</p>
 
 > [!NOTE]
-> **当前测试版本为 1.1.5（Build 57）。** 可从失败页、长图预览或设置发送邮件反馈，并选择附带可预览的诊断信息。纵向状态栏修复已在 Build 56 完成真机验收。[验证记录](Tests/Validation-1.1.5-build56-clear-status-opening.md)
+> **当前测试版本为 1.1.5（Build 58）。** 可从失败页、长图预览或设置发送邮件反馈，并选择附带可预览的诊断信息。纵向状态栏修复已在 Build 56 完成真机验收。[验证记录](Tests/Validation-1.1.5-build56-clear-status-opening.md)
 
 ---
 

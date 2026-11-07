@@ -86,6 +86,7 @@ try {
     ['picker-lifecycle', 'native-with-picker-stubs'], ['capture-overlay', 'native-Vision+OCR-fallback'], ['app-language', 'native+source'],
     ['notification-authorization', 'native-with-system-stubs'], ['storage-cleanup', 'native+source'],
     ['feedback-diagnostics', 'native-privacy-projection'],
+    ['feedback-mail-draft', 'native-mailto-encoding'],
   ]) step(name, level, process.execPath, [`Tests/check-${name}.mjs`]);
 
   const swift = readCommand('xcrun', ['--find', 'swiftc']);

@@ -9,9 +9,11 @@ struct FeedbackView: View {
     @Environment(\.appLanguage) private var language
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @FocusState private var isEditingDescription: Bool
     @State private var issueDescription = ""
     @State private var includesDiagnostics = false
+    @State private var canUseMailComposer = true
     @State private var showsCopyFallback = false
     @State private var notice: String?
     @State private var mailDraft: FeedbackMailDraft?
@@ -19,6 +21,7 @@ struct FeedbackView: View {
     private static let supportAddress = "wenshang017@gmail.com"
 
     var body: some View {
+        let copyBeforeOpening = requiresClipboardHandoff
         NavigationStack {
             Form {
                 Section {
@@ -50,16 +53,20 @@ struct FeedbackView: View {
                     Text(language.text("仅附加可查看的诊断文本，不附加录制画面或照片。"))
                 }
                 Section {
-                    Button(language.text("继续到邮件"), action: prepareEmail)
-                        .accessibilityIdentifier("feedback.continueToEmail")
-                        .disabled(trimmedDescription.isEmpty)
-                    if showsCopyFallback {
-                        Button(language.text("拷贝反馈文本"), action: copyFeedback)
+                    Button(language.text(copyBeforeOpening ? "拷贝正文并打开邮件" : "继续到邮件")) {
+                        prepareEmail(copyBeforeOpening: copyBeforeOpening)
+                    }
+                    .accessibilityIdentifier("feedback.continueToEmail")
+                    .disabled(trimmedDescription.isEmpty)
+                    if !canUseMailComposer || showsCopyFallback {
+                        Button(language.text("拷贝反馈正文"), action: copyFeedback)
                             .accessibilityIdentifier("feedback.copyText")
                             .disabled(trimmedDescription.isEmpty)
+                        LabeledContent(language.text("收件人"), value: Self.supportAddress)
+                            .textSelection(.enabled)
                     }
                 } footer: {
-                    Text(language.text("请在邮件中确认发送。"))
+                    Text(language.text(copyBeforeOpening ? "打开邮件后，请粘贴已拷贝的正文，再确认发送。" : "请在邮件中确认发送。"))
                 }
                 if let notice {
                     Section {
@@ -79,7 +86,10 @@ struct FeedbackView: View {
             }
         }
         .onAppear {
-            if !MFMailComposeViewController.canSendMail() { showsCopyFallback = true }
+            canUseMailComposer = MFMailComposeViewController.canSendMail()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { canUseMailComposer = MFMailComposeViewController.canSendMail() }
         }
         .interactiveDismissDisabled(!trimmedDescription.isEmpty)
         .sheet(item: $mailDraft) { draft in
@@ -98,22 +108,39 @@ struct FeedbackView: View {
                           body: trimmedDescription, diagnostics: includesDiagnostics ? diagnostics : nil)
     }
 
-    private func prepareEmail() {
+    private var requiresClipboardHandoff: Bool {
+        !canUseMailComposer && !trimmedDescription.isEmpty && draft.mailtoURL(diagnosticsLabel: language.text("诊断信息")) == nil
+    }
+
+    private func prepareEmail(copyBeforeOpening: Bool) {
         let draft = draft
         guard !draft.body.isEmpty else { return }
         isEditingDescription = false
         notice = nil
-        if MFMailComposeViewController.canSendMail() {
+        canUseMailComposer = MFMailComposeViewController.canSendMail()
+        if canUseMailComposer {
             mailDraft = draft
             return
         }
-        showsCopyFallback = true
-        guard let url = draft.mailtoURL(diagnosticsLabel: language.text("诊断信息")) else {
-            showNotice("反馈内容较长，请拷贝后粘贴到邮件。")
+        if let url = draft.mailtoURL(diagnosticsLabel: language.text("诊断信息")) {
+            openEmail(url, copiedBody: false)
             return
         }
+        guard copyBeforeOpening, let url = draft.addressedMailtoURL() else {
+            showNotice("正文较长，请选择拷贝正文并打开邮件。")
+            return
+        }
+        copyBody(of: draft)
+        showNotice("已拷贝正文，请在邮件中粘贴。")
+        openEmail(url, copiedBody: true)
+    }
+
+    private func openEmail(_ url: URL, copiedBody: Bool) {
         openURL(url) { accepted in
-            if !accepted { showNotice("无法打开邮件 App，请拷贝反馈文本后手动发送。") }
+            if !accepted {
+                showNotice(copiedBody ? "无法打开邮件 App。正文已拷贝，可在其他邮件 App 中粘贴。"
+                                      : "无法打开邮件 App，请拷贝反馈正文后手动发送。")
+            }
         }
     }
 
@@ -121,11 +148,13 @@ struct FeedbackView: View {
         let draft = draft
         guard !draft.body.isEmpty else { return }
         isEditingDescription = false
-        let text = ["\(language.text("收件人")): \(draft.recipient)",
-                    "\(language.text("主题")): \(draft.subject)", "",
-                    draft.inlineBody(diagnosticsLabel: language.text("诊断信息"))].joined(separator: "\n")
+        copyBody(of: draft)
+        showNotice("已拷贝反馈正文。")
+    }
+
+    private func copyBody(of draft: FeedbackMailDraft) {
+        let text = draft.inlineBody(diagnosticsLabel: language.text("诊断信息"))
         UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: text]], options: [.localOnly: true])
-        showNotice("已拷贝反馈文本。")
     }
 
     private func finishMail(_ result: MFMailComposeResult, error: Error?) {
@@ -145,39 +174,12 @@ struct FeedbackView: View {
 
     private func reportMailFailure() {
         showsCopyFallback = true
-        showNotice("邮件未发送，可拷贝反馈文本后重试。")
+        showNotice("邮件未发送，可拷贝反馈正文后重试。")
     }
 
     private func showNotice(_ message: String) {
         notice = message
         UIAccessibility.post(notification: .announcement, argument: language.text(message))
-    }
-}
-
-private struct FeedbackMailDraft: Identifiable {
-    let id = UUID()
-    let recipient: String
-    let subject: String
-    let body: String
-    let diagnostics: String?
-
-    func inlineBody(diagnosticsLabel: String) -> String {
-        guard let diagnostics else { return body }
-        return "\(body)\n\n\(diagnosticsLabel)\n\(diagnostics)"
-    }
-
-    func mailtoURL(diagnosticsLabel: String) -> URL? {
-        let message = inlineBody(diagnosticsLabel: diagnosticsLabel)
-        // Keep the handoff small and preserve the whole message when it fits.
-        // Percent-encode user text so it cannot introduce more mail fields.
-        let limit = 2_000
-        let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        guard message.utf8.count <= limit,
-              let encodedSubject = subject.addingPercentEncoding(withAllowedCharacters: unreserved),
-              let encodedBody = message.addingPercentEncoding(withAllowedCharacters: unreserved) else { return nil }
-        let address = "mailto:\(recipient)?subject=\(encodedSubject)&body=\(encodedBody)"
-        guard address.utf8.count <= limit else { return nil }
-        return URL(string: address)
     }
 }
 
