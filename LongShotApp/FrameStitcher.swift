@@ -60,7 +60,6 @@ final class FrameStitcher {
         let frameURL: URL?
         let sourceRect: CGRect
         var segmentID: Int? = nil
-        var repairedHeader: CGImage? = nil
     }
 
     private struct HorizontalSegmentPlan {
@@ -1102,42 +1101,6 @@ final class FrameStitcher {
         return result
     }
 
-    /// Verify that a settled replacement is the same native viewport. The
-    /// central opening may contain an expanded system activity; compare the
-    /// entire lower body and the exposed sides immediately below the prefix.
-    private func sameNativeOpeningBody(_ first: CGImage, _ candidate: CGImage,
-                                      contentTop: CGFloat, contentBottom: CGFloat) -> Bool {
-        guard first.width == candidate.width, first.height == candidate.height else { return false }
-        let top = ceil(max(contentTop, CGFloat(first.width) * 0.25) / 16) * 16
-        let bottom = floor(contentBottom / 16) * 16
-        guard bottom - top >= 128 else { return false }
-        func bytes(_ image: CGImage, rect: CGRect) -> [UInt8]? {
-            guard let cropped = image.cropping(to: rect) else { return nil }
-            var result = [UInt8](repeating: 0, count: cropped.width * cropped.height * 4)
-            let ok = result.withUnsafeMutableBytes { storage -> Bool in
-                guard let context = CGContext(data: storage.baseAddress, width: cropped.width, height: cropped.height,
-                    bitsPerComponent: 8, bytesPerRow: cropped.width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
-                context.interpolationQuality = .none; context.setBlendMode(.copy)
-                context.draw(cropped, in: CGRect(x: 0, y: 0, width: cropped.width, height: cropped.height))
-                return true
-            }
-            return ok ? result : nil
-        }
-        var regions = [CGRect(x: 0, y: top, width: CGFloat(first.width), height: bottom - top)]
-        if top > contentTop {
-            let side = floor(CGFloat(first.width) * 0.18 / 16) * 16
-            regions.append(CGRect(x: 0, y: contentTop, width: side, height: top - contentTop))
-            regions.append(CGRect(x: CGFloat(first.width) - side, y: contentTop, width: side, height: top - contentTop))
-        }
-        return autoreleasepool {
-            regions.allSatisfy { rect in
-                guard let a = bytes(first, rect: rect), let b = bytes(candidate, rect: rect) else { return false }
-                return a == b
-            }
-        }
-    }
-
     private func makeSegmentPieces(
         positioned: [PositionedFrame], samples: [FrameSample], contentTop: CGFloat,
         contentBottom: CGFloat, outputTop: CGFloat, width: CGFloat, height: CGFloat,
@@ -1157,36 +1120,7 @@ final class FrameStitcher {
             return options.axis == .horizontal
                 ? $0.frame.index > $1.frame.index : $0.frame.index < $1.frame.index
         }
-        guard var first = coverage.first else { return [] }
-        var repairedHeader: CGImage?
-        if options.axis == .vertical, options.keepsStatusBar,
-           first.start == first.frame.offset, samples[first.frame.index].coveredTop <= outputTop,
-           outputTop < contentTop, let initial = UIImage(contentsOfFile: samples[first.frame.index].url.path)?.cgImage {
-            repairedHeader = CaptureStatusBarCleaner.repairedHeader(in: initial, maximumBottom: contentTop)
-            if repairedHeader == nil {
-                // Never substitute a later scroll position or discard opening
-                // content. Only a proven same-coverage, native-body-identical
-                // frame can replace a captured startup animation as a whole.
-                let candidates = coverage.filter {
-                    $0.frame.index > first.frame.index && $0.frame.offset == first.frame.offset
-                        && $0.start == first.start && $0.end == first.end
-                        && samples[$0.frame.index].coveredTop <= outputTop
-                }.sorted { $0.frame.index < $1.frame.index }.prefix(8)
-                for candidate in candidates {
-                    let patch: CGImage? = autoreleasepool {
-                        guard let image = UIImage(contentsOfFile: samples[candidate.frame.index].url.path)?.cgImage,
-                              sameNativeOpeningBody(initial, image, contentTop: contentTop, contentBottom: contentBottom)
-                        else { return nil }
-                        return CaptureStatusBarCleaner.repairedHeader(in: image, maximumBottom: contentTop)
-                    }
-                    if let patch, let index = coverage.firstIndex(where: { $0.frame.index == candidate.frame.index }) {
-                        coverage.remove(at: index); coverage.insert(candidate, at: 0)
-                        first = candidate; repairedHeader = patch
-                        break
-                    }
-                }
-            }
-        }
+        guard let first = coverage.first else { return [] }
         var pieces: [Piece] = []
         var cursor = first.start
         var last = first
@@ -1203,7 +1137,7 @@ final class FrameStitcher {
             }
             pieces.append(Piece(frameURL: source, sourceRect: CGRect(
                 x: 0, y: prefixTop, width: width, height: contentTop - prefixTop
-            ), repairedHeader: repairedHeader))
+            )))
         }
         for item in coverage {
             // Never stitch across unseen content by inventing a connecting strip.
@@ -1330,7 +1264,7 @@ final class FrameStitcher {
                         y: remaining.minY,
                         width: remaining.width,
                         height: sliceHeight
-                    ), segmentID: piece.segmentID, repairedHeader: piece.repairedHeader
+                    ), segmentID: piece.segmentID
                 )
                 pages[pages.count - 1].append(slice)
                 currentHeight += sliceHeight
@@ -1381,11 +1315,6 @@ final class FrameStitcher {
                         width: width,
                         height: source.size.height
                     ))
-                    if options.keepsStatusBar, let header = piece.repairedHeader {
-                        // Carry the same native patch through pagination, even
-                        // when a page break falls inside the status prefix.
-                        UIImage(cgImage: header).draw(at: CGPoint(x: 0, y: destinationY - piece.sourceRect.minY))
-                    }
                     context.cgContext.restoreGState()
                 }
                 destinationY += piece.sourceRect.height
@@ -1519,11 +1448,6 @@ final class FrameStitcher {
                     let chromeWidth = min(destinationX - startX, source.size.width)
                     context.cgContext.clip(to: CGRect(x: startX, y: headerHeight, width: chromeWidth, height: top - statusHeight))
                     source.draw(at: CGPoint(x: startX, y: headerHeight - statusHeight))
-                    if options.keepsStatusBar, statusHeight == 0, let original = source.cgImage,
-                       let header = CaptureStatusBarCleaner.repairedHeader(in: original,
-                            maximumBottom: min(top, floor(originalHeight * 0.075))) {
-                        UIImage(cgImage: header).draw(at: CGPoint(x: startX, y: headerHeight - statusHeight))
-                    }
                     context.cgContext.restoreGState()
                     let footerTop = registration.map { CGFloat($0.bottom) } ?? (originalHeight - originalBottom)
                     context.cgContext.saveGState()
@@ -1540,10 +1464,6 @@ final class FrameStitcher {
                 context.cgContext.saveGState()
                 context.cgContext.clip(to: CGRect(x: 0, y: 0, width: min(width, source.size.width), height: headerHeight))
                 source.draw(at: .zero)
-                if let original = source.cgImage,
-                   let header = CaptureStatusBarCleaner.repairedHeader(in: original, maximumBottom: headerHeight) {
-                    UIImage(cgImage: header).draw(at: .zero)
-                }
                 context.cgContext.restoreGState()
             }
         }
@@ -2205,20 +2125,11 @@ private enum HorizontalScrollMatcher {
 /// separate from activity occlusion: a normal compact pill is usable input.
 /// Unknown layouts retain their pixels. Never infer another app's safe area.
 enum CaptureStatusBarDetector {
-    struct RepairEvidence {
-        let band: Int
-        let bottom: Int
-        let mask: [UInt8]
-    }
-
     private struct Capsule {
         let band: Int
         let top: CGFloat
         let bottom: CGFloat
         let padding: CGFloat
-        let maskWidth: Int
-        let maskHeight: Int
-        let maskIndices: [Int]
     }
 
     private static func capsule(in image: CGImage, maximumBottom: CGFloat) -> Capsule? {
@@ -2243,7 +2154,6 @@ enum CaptureStatusBarDetector {
         }
         struct Blob {
             var left: Int; var right: Int; var low: Int; var high: Int; var count: Int
-            var indices: [Int] = []
             var w: Int { right - left + 1 }; var h: Int { high - low + 1 }
         }
         func components(_ mask: [Bool]) -> [Blob] {
@@ -2265,7 +2175,6 @@ enum CaptureStatusBarDetector {
                     }
                 }
                 box.count = queue.count
-                box.indices = queue
                 if box.count >= 5 { result.append(box) }
             }
             return result
@@ -2349,8 +2258,7 @@ enum CaptureStatusBarDetector {
             let bottom = max(main.high, bubbles.first?.high ?? main.high)
             let scaleY = CGFloat(band) / CGFloat(height)
             let evidence = Capsule(band: band, top: CGFloat(main.low) * scaleY,
-                bottom: CGFloat(bottom + 1) * scaleY, padding: max(2, nativeWidth / CGFloat(width)),
-                maskWidth: width, maskHeight: height, maskIndices: main.indices + bubbles.flatMap(\.indices))
+                bottom: CGFloat(bottom + 1) * scaleY, padding: max(2, nativeWidth / CGFloat(width)))
             guard ceil(evidence.bottom + evidence.padding) <= maximumBottom else { return nil }
             return evidence
         }
@@ -2368,11 +2276,6 @@ enum CaptureStatusBarDetector {
     }
 
     static func bottom(in image: CGImage, maximumBottom: CGFloat) -> CGFloat? {
-        clockProof(in: image, maximumBottom: maximumBottom)?.bottom
-    }
-
-    private static func clockProof(in image: CGImage, maximumBottom: CGFloat)
-        -> (capsule: Capsule, clock: CGRect, bottom: CGFloat)? {
         let nativeWidth = CGFloat(image.width)
         guard let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
         let band = evidence.band
@@ -2416,319 +2319,7 @@ enum CaptureStatusBarDetector {
         let bottom = ceil(max(pillBottom, clock.maxY) + evidence.padding)
         // Never clamp through a capsule that overlaps the matched content.
         guard bottom <= maximumBottom else { return nil }
-        return (evidence, clock, bottom)
-    }
-
-    /// A repair needs stronger spatial evidence than removing a whole top band.
-    /// Preserve the actual component contours, including detached circles and
-    /// their enclosed recording rings, rather than painting one bounding pill.
-    static func repairEvidence(in image: CGImage, maximumBottom: CGFloat) -> RepairEvidence? {
-        guard let proof = clockProof(in: image, maximumBottom: maximumBottom) else { return nil }
-        let capsule = proof.capsule, w = capsule.maskWidth, h = capsule.maskHeight
-        var silhouette = [UInt8](repeating: 0, count: w * h)
-        for i in capsule.maskIndices { silhouette[i] = 1 }
-        // Flood the exterior: only enclosed holes belong to a proved island.
-        // The photographic gap between separated components remains exterior.
-        var outside = [Bool](repeating: false, count: w * h), queue: [Int] = []
-        func enqueue(_ i: Int) {
-            if silhouette[i] == 0 && !outside[i] { outside[i] = true; queue.append(i) }
-        }
-        for x in 0..<w { enqueue(x); enqueue((h - 1) * w + x) }
-        for y in 0..<h { enqueue(y * w); enqueue(y * w + w - 1) }
-        var cursor = 0
-        while cursor < queue.count {
-            let i = queue[cursor]; cursor += 1
-            let x = i % w, y = i / w
-            if x > 0 { enqueue(i - 1) }; if x + 1 < w { enqueue(i + 1) }
-            if y > 0 { enqueue(i - w) }; if y + 1 < h { enqueue(i + w) }
-        }
-        for i in silhouette.indices where !outside[i] { silhouette[i] = 1 }
-        // One analysis pixel accounts for antialiasing/JPEG edges. Never erase
-        // a nearby clock or any part of the right-hand battery/network region.
-        var expanded = silhouette
-        for i in silhouette.indices where silhouette[i] != 0 {
-            let x = i % w, y = i / w
-            for yy in max(0, y - 1)...min(h - 1, y + 1) {
-                for xx in max(0, x - 1)...min(w - 1, x + 1) { expanded[yy * w + xx] = 1 }
-            }
-        }
-        let protectedClock = proof.clock.insetBy(dx: -capsule.padding * 2, dy: -capsule.padding * 2)
-        var native = [UInt8](repeating: 0, count: image.width * capsule.band)
-        for y in 0..<capsule.band {
-            let yy = min(h - 1, y * h / capsule.band)
-            for x in 0..<image.width where expanded[yy * w + min(w - 1, x * w / image.width)] != 0 {
-                guard y < Int(proof.bottom) else { return nil }
-                native[y * image.width + x] = 1
-            }
-        }
-        // Downsampled contours can miss one or two native antialias pixels.
-        // A black fixed boundary contaminates an entire Poisson repair. Grow
-        // in native pixels, while keeping the proved controls and repair halo
-        // inside the caller's existing output band (never move body rows).
-        let limit = Int(min(CGFloat(capsule.band), floor(maximumBottom)))
-        var grown = native
-        for i in native.indices where native[i] != 0 {
-            let x = i % image.width, y = i / image.width
-            for yy in max(0, y - 2)...min(limit - 1, y + 2) {
-                for xx in max(0, x - 2)...min(image.width - 1, x + 2) { grown[yy * image.width + xx] = 1 }
-            }
-        }
-        var masked = 0, firstX = image.width, repairBottom = Int(proof.bottom)
-        for i in grown.indices where grown[i] != 0 {
-            let x = i % image.width, y = i / image.width
-            guard y < limit, CGFloat(x) < CGFloat(image.width) * 0.78,
-                  !protectedClock.contains(CGPoint(x: x, y: y)) else { return nil }
-            masked += 1; firstX = min(firstX, x); repairBottom = max(repairBottom, y + 1)
-        }
-        guard masked > 0, CGFloat(firstX) > protectedClock.maxX else { return nil }
-        return RepairEvidence(band: capsule.band, bottom: repairBottom, mask: grown)
-
-    }
-}
-
-/// Offline, deterministic repair of a *known* status-overlay mask. This copies
-/// nearby observed texture; it cannot recover the pixels hidden by the system.
-/// The caller supplies a cropped native-resolution top strip and a row-major
-/// mask (nonzero = repair). All pixels outside the mask remain unchanged.
-enum CaptureStatusBarInpainter {
-    private struct Donor { let x: Int; let y: Int }
-
-    static func inpaint(image: CGImage, mask: [UInt8]) -> CGImage? {
-        let width = image.width, height = image.height
-        guard width > 0, height > 0, width <= 4096, height <= 768,
-              width <= 2_000_000 / height, mask.count == width * height else { return nil }
-        var bytes = [UInt8](repeating: 0, count: width * height * 4)
-        let colorSpace = image.colorSpace?.model == .rgb
-            ? image.colorSpace! : CGColorSpaceCreateDeviceRGB()
-        let flags = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
-        let ok = bytes.withUnsafeMutableBytes { storage -> Bool in
-            guard let context = CGContext(data: storage.baseAddress, width: width, height: height,
-                bitsPerComponent: 8, bytesPerRow: width * 4, space: colorSpace, bitmapInfo: flags) else { return false }
-            context.interpolationQuality = .none
-            context.setBlendMode(.copy)
-            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return true
-        }
-        guard ok, let result = inpaintRGBA(bytes, width: width, height: height, mask: mask),
-              let provider = CGDataProvider(data: Data(result) as CFData) else { return nil }
-        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
-            bytesPerRow: width * 4, space: colorSpace, bitmapInfo: CGBitmapInfo(rawValue: flags),
-            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
-    }
-
-    /// Pixels use premultiplied RGBA8. Alpha is retained even inside the mask.
-    /// A failure returns nil; the caller must retain its original strip.
-    static func inpaintRGBA(_ original: [UInt8], width: Int, height: Int, mask: [UInt8]) -> [UInt8]? {
-        guard width > 0, height > 0, width <= 4096, height <= 768,
-              width <= 2_000_000 / height, mask.count == width * height,
-              original.count == width * height * 4 else { return nil }
-        let holes = mask.indices.filter { mask[$0] != 0 }
-        guard !holes.isEmpty else { return original }
-        guard holes.allSatisfy({ $0 % width > 0 && $0 % width + 1 < width
-            && $0 / width > 0 && $0 / width + 1 < height }) else { return nil }
-        // A status overlay must leave enough surrounding observed image.
-        guard holes.count * 4 < mask.count * 3 else { return nil }
-        let bottom = holes.map { $0 / width }.max()!
-        let left = holes.map { $0 % width }.min()!, right = holes.map { $0 % width }.max()!
-        let contextTop = bottom + 3
-        let available = height - contextTop
-        let radius = min(5, max(2, width / 240), (available - 1) / 2)
-        guard radius >= 2 else { return nil }
-        let side = radius * 2 + 1
-        let donorStep = max(2, radius)
-        var donors: [Donor] = []
-        // Only borrow below the entire overlay. This excludes its red glyphs
-        // and the clock/battery beside it without guessing their text colors.
-        for y in stride(from: contextTop + radius, through: height - radius - 1, by: donorStep) {
-            // Donors stay below and horizontally inside the repaired span.
-            // The clock and battery beside a short capsule are never donors.
-            for x in stride(from: max(radius, left + radius),
-                            through: min(width - radius - 1, right - radius), by: donorStep) {
-                var opaque = true
-                for yy in (y - radius)...(y + radius) {
-                    if !opaque { break }
-                    for xx in (x - radius)...(x + radius) where original[(yy * width + xx) * 4 + 3] == 0 {
-                        opaque = false; break
-                    }
-                }
-                if opaque { donors.append(Donor(x: x, y: y)) }
-            }
-        }
-        guard !donors.isEmpty else { return nil }
-        var result = original
-        var pending = mask.map { $0 != 0 }
-        var active = [Bool](repeating: false, count: mask.count)
-        var frontier: [Int] = []
-        func adjacentKnown(_ index: Int) -> Bool {
-            let x = index % width, y = index / width
-            return (x > 0 && !pending[index - 1]) || (x + 1 < width && !pending[index + 1])
-                || (y > 0 && !pending[index - width]) || (y + 1 < height && !pending[index + width])
-        }
-        for index in holes where adjacentKnown(index) { active[index] = true; frontier.append(index) }
-        var remaining = holes.count
-        let sampleStep = 2
-        let maximumDonorXDistance = max(side * 3, width / 8)
-        while remaining > 0 {
-            var target: Int?, largestSupport = -1
-            for index in frontier where pending[index] {
-                let x = index % width, y = index / width
-                var support = 0
-                for yy in stride(from: max(0, y - radius), through: min(height - 1, y + radius), by: sampleStep) {
-                    for xx in stride(from: max(0, x - radius), through: min(width - 1, x + radius), by: sampleStep)
-                        where !pending[yy * width + xx] { support += 1 }
-                }
-                if support > largestSupport || (support == largestSupport && index < (target ?? Int.max)) {
-                    target = index; largestSupport = support
-                }
-            }
-            guard let target, largestSupport > 0 else { return nil }
-            let x = target % width, y = target / width
-            // The same relative pixel locations are compared for every donor.
-            var offsets: [(dx: Int, dy: Int, index: Int)] = []
-            var targetSum = [Double](repeating: 0, count: 3)
-            for yy in stride(from: max(0, y - radius), through: min(height - 1, y + radius), by: sampleStep) {
-                for xx in stride(from: max(0, x - radius), through: min(width - 1, x + radius), by: sampleStep) {
-                    let index = yy * width + xx
-                    if pending[index] { continue }
-                    offsets.append((xx - x, yy - y, index * 4))
-                    for c in 0..<3 { targetSum[c] += Double(result[index * 4 + c]) }
-                }
-            }
-            guard !offsets.isEmpty else { return nil }
-            let count = Double(offsets.count)
-            var best: Donor?, bestBias = [Double](repeating: 0, count: 3), bestScore = Double.infinity
-            for donor in donors where abs(donor.x - x) <= maximumDonorXDistance {
-                var sourceSum = [Double](repeating: 0, count: 3)
-                for offset in offsets {
-                    let index = ((donor.y + offset.dy) * width + donor.x + offset.dx) * 4
-                    for c in 0..<3 { sourceSum[c] += Double(original[index + c]) }
-                }
-                let bias = (0..<3).map { (targetSum[$0] - sourceSum[$0]) / count }
-                var score = 0.0
-                for offset in offsets {
-                    let index = ((donor.y + offset.dy) * width + donor.x + offset.dx) * 4
-                    for c in 0..<3 {
-                        let delta = Double(result[offset.index + c]) - Double(original[index + c]) - bias[c]
-                        score += delta * delta
-                    }
-                }
-                // Prefer nearby texture when several patches fit equally well.
-                score = score / (count * 3) + Double(abs(donor.x - x)) * 0.001
-                    + Double(abs(donor.y - y)) * 0.0001
-                if score < bestScore { best = donor; bestBias = bias; bestScore = score }
-            }
-            guard let best else { return nil }
-            var filled: [Int] = []
-            for yy in max(0, y - radius)...min(height - 1, y + radius) {
-                for xx in max(0, x - radius)...min(width - 1, x + radius) {
-                    let index = yy * width + xx
-                    guard pending[index] else { continue }
-                    let source = ((best.y + yy - y) * width + best.x + xx - x) * 4
-                    let alpha = Double(original[index * 4 + 3])
-                    for c in 0..<3 {
-                        result[index * 4 + c] = UInt8(max(0, min(alpha,
-                            (Double(original[source + c]) + bestBias[c]).rounded())))
-                    }
-                    pending[index] = false; remaining -= 1; filled.append(index)
-                }
-            }
-            for index in filled {
-                let xx = index % width, yy = index / width
-                for neighbor in [xx > 0 ? index - 1 : -1, xx + 1 < width ? index + 1 : -1,
-                                 yy > 0 ? index - width : -1, yy + 1 < height ? index + width : -1]
-                    where neighbor >= 0 && pending[neighbor] && !active[neighbor] {
-                    active[neighbor] = true; frontier.append(neighbor)
-                }
-            }
-            // Keep the active boundary bounded rather than rescanning filled
-            // pixels for the rest of a wide capsule.
-            if frontier.count > side * width {
-                frontier.removeAll { !pending[$0] }
-            }
-        }
-        return blendSeams(original: original, guide: result, width: width, height: height, mask: mask, holes: holes)
-    }
-
-    /// Integrate the borrowed gradients against the *observed* outer boundary.
-    /// Across the mask edge, continue the observed outward slope instead of
-    /// preserving a synthetic capsule-shaped jump. Clipping unusually sharp
-    /// donor jumps suppresses patch seams; no unmasked pixel participates as
-    /// an unknown in this Poisson solve.
-    private static func blendSeams(original: [UInt8], guide: [UInt8], width: Int, height: Int,
-                                   mask: [UInt8], holes: [Int]) -> [UInt8] {
-        var field = [SIMD3<Float>](repeating: .zero, count: mask.count)
-        var divergence = [SIMD3<Float>](repeating: .zero, count: mask.count)
-        func color(_ bytes: [UInt8], _ index: Int) -> SIMD3<Float> {
-            SIMD3(Float(bytes[index * 4]), Float(bytes[index * 4 + 1]), Float(bytes[index * 4 + 2]))
-        }
-        for index in mask.indices { field[index] = color(guide, index) }
-        let bottom = holes.map { $0 / width }.max()!
-        var slopes: [Float] = []
-        for y in stride(from: bottom + 2, to: height - 1, by: 2) {
-            for x in stride(from: 1, to: width - 1, by: 3) {
-                let i = y * width + x
-                for offset in [1, width] {
-                    let delta = color(original, i) - color(original, i + offset)
-                    slopes.append(max(abs(delta.x), abs(delta.y), abs(delta.z)))
-                }
-            }
-        }
-        slopes.sort()
-        let typical = slopes.isEmpty ? 4 : slopes[min(slopes.count - 1, slopes.count * 9 / 10)]
-        let limit = max(6, min(32, typical * 1.5))
-        func clipped(_ value: SIMD3<Float>) -> SIMD3<Float> {
-            SIMD3(max(-limit, min(limit, value.x)), max(-limit, min(limit, value.y)),
-                  max(-limit, min(limit, value.z)))
-        }
-        for index in holes {
-            let here = color(guide, index)
-            var sum = SIMD3<Float>.zero
-            for offset in [-1, 1, -width, width] {
-                let next = index + offset
-                if mask[next] != 0 {
-                    sum += clipped(here - color(guide, next))
-                } else {
-                    let beyond = next + offset
-                    // Avoid crossing a row edge when measuring an X slope.
-                    let valid = beyond >= 0 && beyond < mask.count
-                        && (abs(offset) != 1 || beyond / width == next / width)
-                    sum += valid && mask[beyond] == 0
-                        ? clipped(color(original, next) - color(original, beyond)) : .zero
-                }
-            }
-            divergence[index] = sum
-        }
-        let relaxation: Float = 1.92
-        for iteration in 0..<220 {
-            var largest: Float = 0
-            for index in holes {
-                let proposed = (field[index - 1] + field[index + 1] + field[index - width]
-                    + field[index + width] + divergence[index]) * 0.25
-                let delta = (proposed - field[index]) * relaxation
-                field[index] += delta
-                largest = max(largest, abs(delta.x), abs(delta.y), abs(delta.z))
-            }
-            if iteration >= 20 && largest < 0.025 { break }
-        }
-        var result = original
-        for index in holes {
-            let value = field[index], alpha = Float(original[index * 4 + 3])
-            result[index * 4] = UInt8(max(0, min(alpha, value.x.rounded())))
-            result[index * 4 + 1] = UInt8(max(0, min(alpha, value.y.rounded())))
-            result[index * 4 + 2] = UInt8(max(0, min(alpha, value.z.rounded())))
-        }
-        return result
-    }
-}
-
-/// A local approximation of the background hidden by recording controls.
-/// Only returned output pixels change; captures and matching inputs stay raw.
-enum CaptureStatusBarCleaner {
-    static func repairedHeader(in image: CGImage, maximumBottom: CGFloat) -> CGImage? {
-        guard let evidence = CaptureStatusBarDetector.repairEvidence(in: image, maximumBottom: maximumBottom),
-              let strip = image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: evidence.band)),
-              let repaired = CaptureStatusBarInpainter.inpaint(image: strip, mask: evidence.mask) else { return nil }
-        return repaired.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: evidence.bottom))
+        return bottom
     }
 }
 

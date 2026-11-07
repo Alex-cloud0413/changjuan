@@ -23,14 +23,12 @@ struct StatusBarCropCheck {
             return
         }
 #endif
-        checkInpainterContract()
-        try checkNativeRepairMaskCoverage()
         try checkNativeDetector()
         if let flag = CommandLine.arguments.firstIndex(of: "--fixture") {
             require(flag + 1 < CommandLine.arguments.count, "--fixture needs a local image path")
             try checkPrivateFixture(URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
         }
-        print("Status bar native checks passed (\(checks) assertions): bounded native inpainting contracts, real Vision, compact/split recording indicators, patterned/tall captures and conservative negatives.")
+        print("Status bar native checks passed (\(checks) assertions): real Vision, compact/split recording indicators, patterned/tall captures and conservative negatives.")
     }
 
     private static func require(_ value: Bool, _ message: String, line: UInt = #line) {
@@ -107,8 +105,6 @@ struct StatusBarCropCheck {
             let statusColor = CGColor(gray: dark || background != .plain ? 1 : 0, alpha: 1)
             drawText("09:41", at: CGPoint(x: 78 * scale, y: clockTop), size: 52 * scale,
                      color: statusColor, in: context)
-            // Real status-side pixels make a clock/battery-preservation check
-            // meaningful; neither glyph provides recording-island evidence.
             context.setFillColor(statusColor)
             for index in 0..<4 {
                 context.fill(CGRect(x: CGFloat(1004 + index * 12) * scale,
@@ -183,133 +179,6 @@ struct StatusBarCropCheck {
         context.textPosition = CGPoint(x: point.x, y: point.y + CTFontGetAscent(font))
         CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: value, attributes: attributes)), context)
         context.restoreGState()
-    }
-
-    private static func checkInpainterContract() {
-        let width = 128, height = 72
-        var mask = [UInt8](repeating: 0, count: width * height)
-        // A small capsule and detached circle leave observed context on every
-        // side and below the complete overlay, as required by production.
-        for y in 0..<height {
-            for x in 0..<width {
-                let xx = Double(x) + 0.5, yy = Double(y) + 0.5
-                let capsuleX = max(51, min(77, xx))
-                if pow(xx - capsuleX, 2) + pow(yy - 21, 2) <= 81
-                    || pow(xx - 101, 2) + pow(yy - 23, 2) <= 64 {
-                    mask[y * width + x] = 255
-                }
-            }
-        }
-        var flat = [UInt8]()
-        for gradient in [false, true] {
-            var expected = [UInt8](repeating: 0, count: width * height * 4)
-            for y in 0..<height {
-                for x in 0..<width {
-                    let index = (y * width + x) * 4
-                    for channel in 0..<3 {
-                        let slope = gradient ? Double(x) * 0.2 + Double(y) * 0.3 : 0
-                        expected[index + channel] = UInt8((72 + Double(channel) * 24 + slope).rounded())
-                    }
-                    // Vary alpha while keeping valid premultiplied RGB. This
-                    // proves preservation inside the mask as well as outside it.
-                    expected[index + 3] = UInt8(190 + (x + 2 * y) % 66)
-                }
-            }
-            var damaged = expected
-            // Distinct observed side glyphs must remain byte-exact.
-            for (x, y, rgba) in [(8, 18, [UInt8(180), 180, 180, 220]),
-                                  (119, 20, [UInt8(20), 170, 45, 230])] {
-                let index = (y * width + x) * 4
-                for channel in 0..<4 { damaged[index + channel] = rgba[channel] }
-            }
-            for pixel in mask.indices where mask[pixel] != 0 {
-                for channel in 0..<3 { damaged[pixel * 4 + channel] = 0 }
-            }
-            let label = gradient ? "linear gradient" : "flat background"
-            let repaired = CaptureStatusBarInpainter.inpaintRGBA(damaged, width: width, height: height, mask: mask)
-            require(repaired != nil, "Native inpainter repairs a bounded \(label) mask")
-            let result = repaired!
-            var absoluteError = 0, samples = 0
-            var outsideUnchanged = true, alphaUnchanged = true
-            for pixel in mask.indices {
-                let index = pixel * 4
-                alphaUnchanged = alphaUnchanged && result[index + 3] == damaged[index + 3]
-                if mask[pixel] == 0 {
-                    outsideUnchanged = outsideUnchanged && (0..<4).allSatisfy { result[index + $0] == damaged[index + $0] }
-                } else {
-                    for channel in 0..<3 {
-                        absoluteError += abs(Int(result[index + channel]) - Int(expected[index + channel]))
-                        samples += 1
-                    }
-                }
-            }
-            let meanError = Double(absoluteError) / Double(samples)
-            require(gradient ? meanError < 1 : absoluteError == 0,
-                    "Native \(label) reconstruction meets its masked RGB error bound: \(meanError)")
-            require(outsideUnchanged, "Every unmasked \(label) RGBA byte, including side glyphs, remains unchanged")
-            require(alphaUnchanged, "Every \(label) alpha byte remains unchanged, including inside the mask")
-            require(CaptureStatusBarInpainter.inpaintRGBA(damaged, width: width, height: height, mask: mask) == result,
-                    "Native \(label) repair is deterministic for the same input")
-            if !gradient { flat = damaged }
-        }
-        let empty = [UInt8](repeating: 0, count: mask.count)
-        require(CaptureStatusBarInpainter.inpaintRGBA(flat, width: width, height: height, mask: empty) == flat,
-                "An empty inpainting mask is exact passthrough")
-        var missingContext = empty
-        missingContext[(height - 4) * width + width / 2] = 255
-        require(CaptureStatusBarInpainter.inpaintRGBA(flat, width: width, height: height, mask: missingContext) == nil,
-                "An interior mask with insufficient observed lower context is declined")
-        require(CaptureStatusBarInpainter.inpaintRGBA(flat, width: width, height: height, mask: Array(mask.dropLast())) == nil,
-                "A malformed mask length is declined")
-        require(CaptureStatusBarInpainter.inpaintRGBA(Array(flat.dropLast()), width: width, height: height, mask: mask) == nil,
-                "A malformed RGBA byte length is declined")
-    }
-
-    private static func checkNativeRepairMaskCoverage() throws {
-        for width in [1005, 1206] {
-            let scale = CGFloat(width) / 1206
-            let height = width == 1005 ? 2185 : 2622
-            for top: CGFloat in [37, 42.25, 43.75] {
-                let split = top != 37
-                let label = "\(width)px \(split ? "split" : "compact") at native y=\(top)"
-                let image = try makeHeader(width: width, height: height, clockTop: 72 * scale,
-                    capsuleTop: top, shape: split ? .splitRecording : .recordingCapsule,
-                    scale: scale, background: split ? .photographic : .plain)
-                let proof = CaptureStatusBarDetector.repairEvidence(in: image,
-                    maximumBottom: floor(CGFloat(height) * 0.075))
-                require(proof != nil, "Native mask coverage fixture must prove its clock and island: \(label)")
-                let evidence = proof!
-                let bytes = nativePixels(image, rect: CGRect(x: 0, y: 0, width: width, height: evidence.band))
-                require(bytes.count == width * evidence.band * 4 && evidence.mask.count == width * evidence.band,
-                        "Native source pixels and repair mask share exact row-major dimensions: \(label)")
-                let main = CGRect(x: CGFloat(width) / 2 - 176 * scale, y: top,
-                    width: 352 * scale, height: 108 * scale)
-                var regions = [main]
-                if split {
-                    regions.append(CGRect(x: main.maxX + 24 * scale, y: top + 14 * scale,
-                        width: 108 * scale, height: 108 * scale))
-                }
-                var counts: [Int] = [], uncovered = 0
-                for region in regions {
-                    var black = 0
-                    // Inspect only the known indicator bounds, not dark photo
-                    // content elsewhere. Every near-black edge pixel matters:
-                    // even a small fixed black rim contaminates a Poisson fill.
-                    for y in max(0, Int(floor(region.minY)))..<min(evidence.band, Int(ceil(region.maxY))) {
-                        for x in max(0, Int(floor(region.minX)))..<min(width, Int(ceil(region.maxX))) {
-                            let pixel = y * width + x, index = pixel * 4
-                            if max(bytes[index], bytes[index + 1], bytes[index + 2]) < 28 {
-                                black += 1
-                                if evidence.mask[pixel] == 0 { uncovered += 1 }
-                            }
-                        }
-                    }
-                    counts.append(black)
-                }
-                require(counts.allSatisfy { $0 > 100 } && uncovered == 0,
-                        "Native repair mask covers every source near-black main/circle pixel: \(label), sourceCounts=\(counts), uncovered=\(uncovered)")
-            }
-        }
     }
 
     private static func checkNativeDetector() throws {
@@ -461,17 +330,12 @@ struct StatusBarCropCheck {
         require(pixelError(source, rect: CGRect(x: 0, y: cut, width: source.width, height: 120),
                            cropped, rect: CGRect(x: 0, y: 0, width: source.width, height: 120)) < 5,
                 "Retained navigation/title pixels follow the exact source crop")
-        checkCleanStatusHeader(source: source, output: kept, label: "Plain compact ON")
-        require(nativePixelError(source, rect: CGRect(x: 0, y: 178, width: source.width, height: 360),
-                                 kept, rect: CGRect(x: 0, y: 178, width: source.width, height: 360)) < 5,
-                "Clean ON retains native navigation/title/body pixels below the proved band")
+        checkRawStatusHeader(source: source, output: kept, label: "Plain portrait ON")
         let legacy = try stitch(frames, "legacy-positive", ratio: 0.075)
         require(try kept.height - readImage(legacy.outputURLs[0]).height == Int(floor(CGFloat(source.height) * 0.075)),
                 "Previously recorded positive crop ratios keep their old meaning")
-        let legacyOn = try stitch(frames, "legacy-positive-on", keep: true, ratio: 0.075)
-        let legacyKept = try readImage(legacyOn.outputURLs[0])
-        require(legacyKept.height == kept.height, "Legacy ON preserves the complete native status row")
-        checkCleanStatusHeader(source: source, output: legacyKept, label: "Legacy positive-ratio ON")
+        let legacyOn = try stitch(frames, "legacy-on", keep: true, ratio: 0.075)
+        checkRawStatusHeader(source: source, output: try readImage(legacyOn.outputURLs[0]), label: "Legacy-ratio ON")
         let unknownOff = try stitch(noStatus, "unknown-off")
         let unknownOn = try stitch(noStatus, "unknown-on", keep: true)
         require(try Data(contentsOf: unknownOff.outputURLs[0]) == Data(contentsOf: unknownOn.outputURLs[0]),
@@ -481,7 +345,7 @@ struct StatusBarCropCheck {
                 "Reverse recording detects the actual selected upper source")
         let reverseOn = try stitch(Array(frames.reversed()), "reverse-on", keep: true)
         require(try Data(contentsOf: on.outputURLs[0]) == Data(contentsOf: reverseOn.outputURLs[0]),
-                "Clean ON uses the same actual upper prefix in forward and reverse recordings")
+                "Reverse ON preserves the same actual upper-source header and native body")
         for (url, data) in originals {
             try FramePreparationCache.store(FrameStitcher().prepareFrame(at: url, encodedData: data), for: url)
         }
@@ -490,18 +354,18 @@ struct StatusBarCropCheck {
         require(try Data(contentsOf: off.outputURLs[0]) == Data(contentsOf: cached.outputURLs[0]),
                 "Prepared and original analysis paths produce byte-identical JPEG outputs")
         let cachedOn = try stitch(frames, "cached-on", keep: true, cached: true)
-        require(cachedOn.preparedFrameCount == frames.count, "Clean ON reuses all prepared analysis payloads")
-        require(try Data(contentsOf: on.outputURLs[0]) == Data(contentsOf: cachedOn.outputURLs[0]),
-                "Clean ON has identical native output with cached and uncached analysis")
+        require(try cachedOn.preparedFrameCount == frames.count
+                && Data(contentsOf: on.outputURLs[0]) == Data(contentsOf: cachedOn.outputURLs[0]),
+                "Prepared and original ON paths preserve identical original header pixels")
         let pages = frames + [frames[0]]
         let pageOff = try stitch(pages, "page-off", boundaries: [0, frames.count])
         let pageOn = try stitch(pages, "page-on", keep: true, boundaries: [0, frames.count])
         require(try readImage(pageOn.outputURLs[0]).height - readImage(pageOff.outputURLs[0]).height == 2 * cut,
                 "Each explicit page removes its own status bar, including a static page")
-        let pageKept = try readImage(pageOn.outputURLs[0])
-        checkCleanStatusHeader(source: source, output: pageKept, label: "First explicit page ON")
-        checkCleanStatusHeader(source: source, output: pageKept,
-            outputY: kept.height + max(8, Int(floor(CGFloat(source.width) * 0.018))), label: "Static second page ON")
+        let explicitKept = try readImage(pageOn.outputURLs[0])
+        checkRawStatusHeader(source: source, output: explicitKept, label: "First explicit page ON")
+        checkRawStatusHeader(source: source, output: explicitKept,
+            outputY: kept.height + max(8, Int(floor(CGFloat(source.width) * 0.018))), label: "Static explicit page ON")
         let geometry = [
             CaptureGeometrySegment(startFrame: 0, pixelWidth: 1206, pixelHeight: 2622, videoOrientation: 1),
             CaptureGeometrySegment(startFrame: frames.count, pixelWidth: 1005, pixelHeight: 2185, videoOrientation: 1)
@@ -517,21 +381,19 @@ struct StatusBarCropCheck {
             let a = try readImage(geoOn.outputURLs[index]), b = try readImage(geoOff.outputURLs[index])
             require(a.width == raw.width && b.width == raw.width && a.height - b.height == Int(detected!),
                     "Geometry page \(index) crops only its own proved status pixels")
-            checkCleanStatusHeader(source: raw, output: a, label: "Native geometry \(index) ON")
+            checkRawStatusHeader(source: raw, output: a, label: "Native geometry \(index) ON")
         }
         try checkPatternedIntegration(in: root.appendingPathComponent("patterned"))
-        try checkCleanerNegatives(in: root.appendingPathComponent("cleaner-negatives"))
-        try checkTransientOpeningIntegration(in: root.appendingPathComponent("transient-opening"))
-        try checkPrefixPaginationIntegration(in: root.appendingPathComponent("prefix-pagination"))
+        try checkCapturedHeaderIntegration(in: root.appendingPathComponent("captured-header"))
         try checkHorizontalIntegration(in: root.appendingPathComponent("horizontal"))
         for (url, data) in originals {
             require(try Data(contentsOf: url) == data, "Every original JPEG remains byte-for-byte unchanged")
         }
-        print("Status-bar UIKit integration passed (\(checks) assertions): unchanged OFF cropping, clean ON island/bubble removal, native clock/battery/title/body pixels, conservative negatives, legacy ratio, reverse, cache, explicit/static pages and geometry groups. Generated fixtures: \(root.path)")
+        print("Status-bar UIKit integration passed (\(checks) assertions): OFF boundary cropping, original ON clock/island/circle/battery pixels, captured animation, fractional geometry, patterned headers, legacy ratio, reverse, cache and explicit/static pages. Generated fixtures: \(root.path)")
     }
 
     private static func checkPatternedIntegration(in root: URL) throws {
-        for background in [HeaderBackground.plain, .textured, .photographic] {
+        for background in [HeaderBackground.textured, .photographic] {
             let directory = root.appendingPathComponent(String(describing: background))
             let frames = try makeScrollFrames(in: directory.appendingPathComponent("frames"), status: true,
                 count: 2, background: background, indicator: .splitRecording, jpegQuality: 0.9)
@@ -541,12 +403,6 @@ struct StatusBarCropCheck {
             require(detected != nil && detected! >= 164 && detected! < 178,
                     "JPEG \(background) source proves the complete split recording band")
             let cut = Int(detected!)
-            let repaired = CaptureStatusBarCleaner.repairedHeader(in: source, maximumBottom: 196)
-            require(repaired != nil, "\(background) split-recording header must produce a native cleaner patch")
-            let patch = repaired!
-            require(patch.width == source.width && patch.height <= 196 && patch.height >= 164,
-                    "The cleaner returns a native top patch through the complete bubble, not a resized full image")
-            checkCleanStatusHeader(source: source, output: patch, split: true, label: "\(background) native cleaner patch")
             let off = try FrameStitcher(options: CaptureOptions(keepsStatusBar: false)).stitch(
                 frameURLs: frames, sessionURL: directory.appendingPathComponent("off"), topCropRatio: 0)
             let on = try FrameStitcher(options: CaptureOptions(keepsStatusBar: true)).stitch(
@@ -560,10 +416,10 @@ struct StatusBarCropCheck {
             require(nativePixelError(source, rect: CGRect(x: 0, y: cut, width: source.width, height: 360),
                                      cropped, rect: CGRect(x: 0, y: 0, width: source.width, height: 360)) < 5,
                     "Patterned OFF retains exact native navigation, title and first body pixels below the entire band")
-            checkCleanStatusHeader(source: source, output: kept, split: true, label: "\(background) split-recording ON")
-            require(nativePixelError(source, rect: CGRect(x: 0, y: 178, width: source.width, height: 360),
-                                     kept, rect: CGRect(x: 0, y: 178, width: source.width, height: 360)) < 5,
-                    "Patterned clean ON preserves native navigation/title/body below the entire island and bubble")
+            require(nativePixelError(source, rect: CGRect(x: 0, y: 0, width: source.width, height: 360),
+                                     kept, rect: CGRect(x: 0, y: 0, width: source.width, height: 360)) < 5,
+                    "Patterned ON retains the authentic photographic status header and title at native resolution")
+            checkRawStatusHeader(source: source, output: kept, split: true, label: "\(background) split-header ON")
             let last = try readImage(frames[1])
             require(nativePixelError(last, rect: CGRect(x: 0, y: 440, width: last.width, height: 96),
                                      cropped, rect: CGRect(x: 0, y: 440 + 137 - cut, width: last.width, height: 96)) < 5,
@@ -574,194 +430,87 @@ struct StatusBarCropCheck {
         }
     }
 
-    private static func checkCleanerNegatives(in root: URL) throws {
-        for (name, shape) in [("photo-clock-without-island", Shape.absent),
-                               ("photo-content-rectangle", .rectangle),
-                               ("photo-content-circle", .circle)] {
-            let directory = root.appendingPathComponent(name)
+    private static func checkCapturedHeaderIntegration(in root: URL) throws {
+        for (width, offset) in [(1206, CGFloat(0.25)), (1005, CGFloat(1.75))] {
+            let directory = root.appendingPathComponent("fractional-\(width)")
             let frames = try makeScrollFrames(in: directory.appendingPathComponent("frames"), status: true,
-                count: 2, background: .photographic, indicator: shape, jpegQuality: 0.9)
+                width: width, height: width == 1206 ? 2622 : 2185, count: 2, headerOffset: offset,
+                background: .photographic, indicator: .splitRecording, jpegQuality: 0.9)
             let originals = try frames.map { ($0, try Data(contentsOf: $0)) }
             let source = try readImage(frames[0])
-            require(CaptureStatusBarCleaner.repairedHeader(in: source, maximumBottom: 196) == nil,
-                    "The cleaner must decline unproved photographic content: \(name)")
-            let off = try FrameStitcher(options: CaptureOptions(keepsStatusBar: false)).stitch(
-                frameURLs: frames, sessionURL: directory.appendingPathComponent("off"), topCropRatio: 0)
-            let on = try FrameStitcher(options: CaptureOptions(keepsStatusBar: true)).stitch(
+            let result = try FrameStitcher(options: CaptureOptions(keepsStatusBar: true)).stitch(
                 frameURLs: frames, sessionURL: directory.appendingPathComponent("on"), topCropRatio: 0)
-            require(off.outputURLs.count == 1 && on.outputURLs.count == 1,
-                    "Unproved photographic content still produces its complete scrolling page")
-            require(try Data(contentsOf: off.outputURLs[0]) == Data(contentsOf: on.outputURLs[0]),
-                    "Clean ON must not alter arbitrary photographic content or status sides: \(name)")
+            let output = try readImage(result.outputURLs[0])
+            require(output.width == source.width && output.height == source.height + 137,
+                    "Fractional native status geometry preserves every original body row")
+            checkRawStatusHeader(source: source, output: output, split: true, islandTop: 42 + offset,
+                label: "Fractional \(width)px captured ON")
             for (url, bytes) in originals {
-                require(try Data(contentsOf: url) == bytes, "Negative fixture source JPEG bytes remain unchanged")
+                require(try Data(contentsOf: url) == bytes, "Fractional source JPEG bytes remain unchanged")
             }
         }
-        for (name, image) in [
-            ("missing clock", try makeHeader(clockTop: nil, shape: .splitRecording, background: .photographic)),
-            ("unbounded recording bubble", try makeHeader(shape: .spurredRecordingBubble, background: .photographic)),
-            ("photo island without recording evidence", try makeHeader(background: .photographic))
-        ] {
-            require(CaptureStatusBarCleaner.repairedHeader(in: image, maximumBottom: 196) == nil,
-                    "A cleaner patch needs the same conservative clock/island evidence: \(name)")
-        }
-    }
 
-    private static func checkPrefixPaginationIntegration(in root: URL) throws {
-        let frames = try makeScrollFrames(in: root.appendingPathComponent("frames"), status: true,
-            count: 2, background: .photographic, indicator: .splitRecording, jpegQuality: 0.9)
+        let directory = root.appendingPathComponent("opening-animation")
+        let frames = try makeScrollFrames(in: directory.appendingPathComponent("frames"), status: true,
+            count: 4, jpegQuality: 0.9, scrollOffsets: [0, 0, 137, 274], transientOpening: true)
         let originals = try frames.map { ($0, try Data(contentsOf: $0)) }
-        let source = try readImage(frames[0])
-        let firstPageHeight = source.height + 137
-        let separator = max(8, Int(floor(CGFloat(source.width) * 0.018)))
-        let secondStart = firstPageHeight + separator
-        let firstFragmentHeight = 70, prefixHeight = 196
-        let pageLimit = secondStart + firstFragmentHeight
-        let result = try FrameStitcher(usePreparedFrames: false,
-            options: CaptureOptions(keepsStatusBar: true), testPageLimit: CGFloat(pageLimit)).stitch(
-                frameURLs: frames + [frames[0]], sessionURL: root.appendingPathComponent("on"),
-                topCropRatio: 0, segmentStarts: [0, frames.count])
-        require(result.outputURLs.count == 2, "The second explicit status prefix crosses a real output-page boundary")
-        let first = try readImage(result.outputURLs[0]), second = try readImage(result.outputURLs[1])
-        require(first.height == pageLimit && first.width == source.width && second.width == source.width
-                && first.height + second.height == secondStart + source.height,
-                "Prefix pagination retains all native rows, including the explicit static page and separator")
-        let leading = nativePixels(first, rect: CGRect(x: 0, y: secondStart,
-            width: source.width, height: firstFragmentHeight))
-        let trailing = nativePixels(second, rect: CGRect(x: 0, y: 0,
-            width: source.width, height: prefixHeight - firstFragmentHeight))
-        require(leading.count == source.width * firstFragmentHeight * 4
-                && trailing.count == source.width * (prefixHeight - firstFragmentHeight) * 4,
-                "Both native header fragments are present after splitting inside the clock/island band")
-        // Reassemble only the196px prefix, never the complete long outputs.
-        guard let provider = CGDataProvider(data: Data(leading + trailing) as CFData),
-              let header = CGImage(width: source.width, height: prefixHeight,
-                bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: source.width * 4,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue),
-                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else {
-            throw CheckError.image
+        let opening = try readImage(frames[0]), later = try readImage(frames[1])
+        let bodyBottom = opening.height - Int(ceil(CGFloat(opening.height) * 0.19))
+        let body = CGRect(x: 0, y: 304, width: opening.width, height: bodyBottom - 304)
+        require(nativePixelError(opening, rect: body, later, rect: body) == 0,
+                "Captured-animation fixture offers a later compact frame with identical native body pixels")
+        let result: StitchResult
+        do {
+            result = try FrameStitcher(options: CaptureOptions(keepsStatusBar: true)).stitch(
+                frameURLs: frames, sessionURL: directory.appendingPathComponent("on"), topCropRatio: 0)
+        } catch {
+            FileHandle.standardError.write(Data("Captured-animation ON fixture failed at \(directory.path): \(error)\n".utf8))
+            throw error
         }
-        checkCleanStatusHeader(source: source, output: header, split: true,
-            label: "Paginated static-page prefix across70px break")
-        let navigation = CGRect(x: 0, y: 178, width: source.width, height: 18)
-        require(nativePixelError(source, rect: navigation, header, rect: navigation) < 5,
-                "The second prefix fragment preserves native navigation rows below the entire repaired island and circle")
+        let output = try readImage(result.outputURLs[0])
+        require(output.width == opening.width && output.height == opening.height + 274,
+                "Original opening presentation preserves all observed native body rows")
+        checkRawStatusHeader(source: opening, output: output, recording: true, islandTop: 32, islandHeight: 190,
+            label: "Actual opening-animation ON")
+        let tail = CGRect(x: 400, y: 196, width: 420, height: 27)
+        require(nativePixelError(opening, rect: tail, output, rect: tail) < 5,
+                "ON retains the original captured animation tail through222px")
+        require(nativePixelError(opening, rect: body, output, rect: body) < 5,
+                "Captured opening preservation leaves the entire first native body viewport intact")
         for (url, bytes) in originals {
-            require(try Data(contentsOf: url) == bytes, "Prefix-pagination source JPEG bytes remain unchanged")
+            require(try Data(contentsOf: url) == bytes, "Captured-animation source JPEG bytes remain unchanged")
         }
     }
 
-    private static func checkTransientOpeningIntegration(in root: URL) throws {
-        for scenario in ["same-viewport", "one-pixel-body-change", "different-position"] {
-            let directory = root.appendingPathComponent(scenario)
-            // Longer sequences need two agreeing moving edges; a duplicate
-            // opening plus just one scroll is intentionally not usable motion.
-            let offsets = scenario == "different-position" ? [0, 137, 274, 411] : [0, 0, 137, 274]
-            let frames = try makeScrollFrames(in: directory.appendingPathComponent("frames"), status: true,
-                count: offsets.count, jpegQuality: 0.9, scrollOffsets: offsets, transientOpening: true,
-                changedOpeningCandidatePixel: scenario == "one-pixel-body-change")
-            func stitch(keep: Bool) throws -> StitchResult {
-                do {
-                    return try FrameStitcher(options: CaptureOptions(keepsStatusBar: keep)).stitch(
-                        frameURLs: frames, sessionURL: directory.appendingPathComponent(keep ? "on" : "off"), topCropRatio: 0)
-                } catch {
-                    FileHandle.standardError.write(Data("Transient-opening fixture failed: \(scenario), keep=\(keep), root=\(directory.path), error=\(error)\n".utf8))
-                    throw error
-                }
-            }
-            let originals = try frames.map { ($0, try Data(contentsOf: $0)) }
-            let opening = try readImage(frames[0]), stable = try readImage(frames[1])
-            let bodyBottom = opening.height - Int(ceil(CGFloat(opening.height) * 0.19))
-            let body = CGRect(x: 0, y: 304, width: opening.width, height: bodyBottom - 304)
-            let sameBody = nativePixels(opening, rect: body) == nativePixels(stable, rect: body)
-            require(sameBody == (scenario == "same-viewport"),
-                    "Transient fixtures share exact native JPEG body pixels only for the genuine duplicate viewport: \(scenario)")
-            require(CaptureStatusBarDetector.bottom(in: opening, maximumBottom: 196) == nil,
-                    "The 190-pixel-high opening overlay cannot prove a normal compact status bar")
-            require(CaptureStatusBarDetector.bottom(in: stable, maximumBottom: 196) != nil,
-                    "The later candidate contains a genuine compact status bar")
-            let on = try stitch(keep: true)
-            require(on.outputURLs.count == 1, "Transient opening selection keeps one complete native result")
-            let kept = try readImage(on.outputURLs[0])
-            require(kept.width == opening.width && kept.height == opening.height + offsets.last!,
-                    "Transient selection retains every observed native body row: \(scenario)")
-            let overlayROI = CGRect(x: 400, y: 24, width: 420, height: 220)
-            if scenario == "same-viewport" {
-                checkCleanStatusHeader(source: stable, output: kept, capsuleOffset: 2,
-                    label: "Settled duplicate opening ON")
-                require(nativePixelError(stable, rect: CGRect(x: 0, y: 178, width: stable.width, height: 126),
-                                         kept, rect: CGRect(x: 0, y: 178, width: stable.width, height: 126)) < 5,
-                        "ON replaces the complete opening coverage, including the transient tail at rows196...222")
-                let tail = CGRect(x: 0, y: 196, width: stable.width, height: 27)
-                require(nativePixelError(stable, rect: tail, kept, rect: tail) < 5,
-                        "The exact transient tail rows come from the settled viewport, not the original expanded overlay")
-                require(nativePixelError(stable, rect: body, kept, rect: body) < 5,
-                        "ON retains the complete first native body viewport when choosing its equivalent settled frame")
-                let off = try stitch(keep: false)
-                let cropped = try readImage(off.outputURLs[0])
-                require(cropped.width == kept.width && cropped.height == kept.height,
-                        "OFF retains its original no-proved-boundary dimensions for the transient prefix")
-                require(nativePixelError(opening, rect: CGRect(x: 0, y: 0, width: opening.width, height: 304),
-                                         cropped, rect: CGRect(x: 0, y: 0, width: opening.width, height: 304)) < 5,
-                        "OFF keeps the original transient opening and tail; ON-only selection cannot change it")
-                require(nativePixelError(opening, rect: overlayROI, cropped, rect: overlayROI) < 5,
-                        "OFF preserves the original expanded overlay itself at native resolution")
-            } else {
-                require(nativePixelError(opening, rect: CGRect(x: 0, y: 0, width: opening.width, height: 304),
-                                         kept, rect: CGRect(x: 0, y: 0, width: opening.width, height: 304)) < 5,
-                        "A changed body or different scroll position cannot replace the authentic opening: \(scenario)")
-                require(nativePixelError(opening, rect: overlayROI, kept, rect: overlayROI) < 5,
-                        "The expanded overlay cannot be replaced by a nonidentical candidate: \(scenario)")
-            }
-            for (url, bytes) in originals {
-                require(try Data(contentsOf: url) == bytes, "Transient source JPEG bytes remain unchanged")
-            }
-        }
-    }
-
-    private static func checkCleanStatusHeader(source: CGImage, output: CGImage, outputY: Int = 0,
-                                              split: Bool = false, capsuleOffset: CGFloat = 0, label: String) {
+    private static func checkRawStatusHeader(source: CGImage, output: CGImage, outputY: Int = 0,
+                                            split: Bool = false, recording: Bool = false,
+                                            islandTop: CGFloat = 42, islandHeight: CGFloat = 108, label: String) {
         let scale = CGFloat(source.width) / 1206
         func scaled(_ rect: CGRect) -> CGRect {
             CGRect(x: rect.minX * scale, y: rect.minY * scale,
                 width: rect.width * scale, height: rect.height * scale).integral
         }
-        for (name, rect) in [("clock", CGRect(x: 65, y: 60, width: 210, height: 90)),
-                              ("battery/network", CGRect(x: 990, y: 60, width: 175, height: 90))] {
-            let roi = scaled(rect)
-            require(nativePixelError(source, rect: roi, output,
-                rect: roi.offsetBy(dx: 0, dy: CGFloat(outputY))) < 5,
-                "\(label) preserves the actual captured \(name) at native resolution")
+        var regions = [("complete original top band", CGRect(x: 0, y: 0,
+            width: source.width, height: Int(floor(CGFloat(source.height) * 0.075)))),
+            ("clock", scaled(CGRect(x: 65, y: 60, width: 210, height: 90))),
+            ("battery/network", scaled(CGRect(x: 990, y: 60, width: 175, height: 90))),
+            ("whole island", CGRect(x: CGFloat(source.width) / 2 - 176 * scale,
+                y: islandTop * scale, width: 352 * scale, height: islandHeight * scale).integral)]
+        if recording || split {
+            regions.append(("island recording mark", CGRect(x: CGFloat(source.width) / 2 + 96 * scale,
+                y: (islandTop + 28) * scale, width: 52 * scale, height: 52 * scale).integral))
         }
-        let main = CGRect(x: CGFloat(source.width) / 2 - 176 * scale,
-            y: (42 + capsuleOffset) * scale, width: 352 * scale, height: 108 * scale).integral
-        var regions = [("main island", main)]
         if split {
-            regions.append(("detached recording circle", CGRect(x: CGFloat(source.width) / 2 + 200 * scale,
-                y: (56 + capsuleOffset) * scale, width: 108 * scale, height: 108 * scale).integral))
+            regions.append(("whole detached circle", CGRect(x: CGFloat(source.width) / 2 + 200 * scale,
+                y: (islandTop + 14) * scale, width: 108 * scale, height: 108 * scale).integral))
+            regions.append(("detached recording mark", CGRect(x: CGFloat(source.width) / 2 + 227 * scale,
+                y: (islandTop + 41) * scale, width: 54 * scale, height: 54 * scale).integral))
         }
-        for (name, roi) in regions {
-            let original = statusArtifactFractions(source, rect: roi)
-            let cleaned = statusArtifactFractions(output, rect: roi.offsetBy(dx: 0, dy: CGFloat(outputY)))
-            require(original.dark > 0.5, "\(label) source contains a real near-black \(name), so removal cannot pass vacuously")
-            if split { require(original.red > 0.01, "\(label) source contains the \(name) recording mark") }
-            require(cleaned.dark < 0.001 && cleaned.red < 0.002,
-                    "\(label) removes the whole \(name), including its recording mark: dark=\(cleaned.dark), red=\(cleaned.red)")
+        for (name, rect) in regions {
+            require(nativePixelError(source, rect: rect, output,
+                rect: rect.offsetBy(dx: 0, dy: CGFloat(outputY))) < 5,
+                "\(label) preserves the captured \(name) at native resolution")
         }
-    }
-
-    private static func statusArtifactFractions(_ image: CGImage, rect: CGRect) -> (dark: Double, red: Double) {
-        let bytes = nativePixels(image, rect: rect)
-        guard !bytes.isEmpty else { return (.infinity, .infinity) }
-        var dark = 0, red = 0
-        for index in stride(from: 0, to: bytes.count, by: 4) {
-            let r = Int(bytes[index]), g = Int(bytes[index + 1]), b = Int(bytes[index + 2])
-            if max(r, g, b) < 28 { dark += 1 }
-            if r > 70 && Double(r) > Double(g) * 1.6 && Double(r) > Double(b) * 1.5 { red += 1 }
-        }
-        let count = Double(bytes.count / 4)
-        return (Double(dark) / count, Double(red) / count)
     }
 
     private static func checkMovingStatusProbe() throws {
@@ -816,25 +565,31 @@ struct StatusBarCropCheck {
         require(pixelError(source, rect: CGRect(x: 0, y: cut, width: source.width, height: 120),
                            cropped, rect: CGRect(x: 0, y: 0, width: source.width, height: 120)) < 5,
                 "Horizontal OFF preserves navigation/title pixels below the band")
-        checkCleanStatusHeader(source: source, output: kept, label: "Horizontal compact ON")
+        checkRawStatusHeader(source: source, output: kept, label: "Horizontal ON")
         require(pixelError(kept, rect: CGRect(x: source.width + 20, y: 0, width: 100, height: cut),
                            kept, rect: CGRect(x: source.width + 140, y: 0, width: 100, height: cut)) < 1,
                 "Horizontal ON leaves the extra wide status region uniform")
         let legacy = try stitch(frames, "legacy", ratio: 0.075)
         require(try readImage(legacy.outputURLs[0]).height == source.height - Int(floor(CGFloat(source.height) * 0.075)),
                 "Horizontal legacy crop ratios retain their original meaning")
+        let legacyOn = try stitch(frames, "legacy-on", keep: true, ratio: 0.075)
+        checkRawStatusHeader(source: source, output: try readImage(legacyOn.outputURLs[0]),
+            label: "Horizontal legacy-ratio ON")
         let animatedOff = try stitch(animated, "animated-off"), animatedOn = try stitch(animated, "animated-on", keep: true)
         require(try readImage(animatedOff.outputURLs[0]).width == source.width + 2 * 137
                 && readImage(animatedOn.outputURLs[0]).height - readImage(animatedOff.outputURLs[0]).height == cut,
                 "Moving compact status indicators cannot become a false column-identity layer")
-        checkCleanStatusHeader(source: source, output: try readImage(animatedOn.outputURLs[0]),
-            label: "Horizontal moving-indicator ON")
+        checkRawStatusHeader(source: try readImage(animated[0]), output: try readImage(animatedOn.outputURLs[0]),
+            label: "Horizontal captured moving-status ON")
         let animatedReverse = try stitch(Array(animated.reversed()), "animated-reverse")
         require(try Data(contentsOf: animatedReverse.outputURLs[0]) == Data(contentsOf: animatedOff.outputURLs[0]),
                 "Animated-status horizontal reverse preserves the same native output")
         let reverse = try stitch(Array(frames.reversed()), "reverse")
         require(try Data(contentsOf: reverse.outputURLs[0]) == Data(contentsOf: off.outputURLs[0]),
                 "Horizontal reverse capture uses the selected original prefix")
+        let reverseOn = try stitch(Array(frames.reversed()), "reverse-on", keep: true)
+        require(try Data(contentsOf: reverseOn.outputURLs[0]) == Data(contentsOf: on.outputURLs[0]),
+                "Horizontal reverse ON keeps the same original native status header")
         for (url, data) in originals {
             try FramePreparationCache.store(FrameStitcher(options: CaptureOptions(axis: .horizontal))
                 .prepareFrame(at: url, encodedData: data), for: url)
@@ -842,6 +597,10 @@ struct StatusBarCropCheck {
         let cached = try stitch(frames, "cached", cached: true)
         require(try cached.preparedFrameCount == frames.count && Data(contentsOf: cached.outputURLs[0]) == Data(contentsOf: off.outputURLs[0]),
                 "Horizontal crop preserves cached/uncached output equivalence")
+        let cachedOn = try stitch(frames, "cached-on", keep: true, cached: true)
+        require(try cachedOn.preparedFrameCount == frames.count
+                && Data(contentsOf: cachedOn.outputURLs[0]) == Data(contentsOf: on.outputURLs[0]),
+                "Horizontal cached ON preserves identical original status and body pixels")
         let earlyOff = try stitch(early, "early-row-off"), earlyOn = try stitch(early, "early-row-on", keep: true)
         let earlyImage = try readImage(earlyOn.outputURLs[0])
         let observedBottoms = try early.map { url -> CGFloat in
@@ -875,10 +634,9 @@ struct StatusBarCropCheck {
                 "Mixed positive pages prove two distinct status extents independently")
         let variedOff = try stitch(frames + shifted, "different-status-extents", starts: [frames.count])
         let variedOn = try stitch(frames + shifted, "different-status-extents-on", keep: true, starts: [frames.count])
-        let variedKept = try readImage(variedOn.outputURLs[0])
-        require(try readImage(variedOff.outputURLs[0]).height == source.height && variedKept.height == source.height,
-                "Different proved status extents preserve native row counts instead of bisecting a capsule")
-        checkCleanStatusHeader(source: source, output: variedKept, label: "Horizontal unequal-status ON")
+        require(try readImage(variedOff.outputURLs[0]).height == source.height
+                && Data(contentsOf: variedOff.outputURLs[0]) == Data(contentsOf: variedOn.outputURLs[0]),
+                "Different proved status extents preserve whole bars instead of bisecting a capsule")
         let mixed = try stitch(frames + [unknown[0]], "mixed-evidence", starts: [frames.count])
         require(try readImage(mixed.outputURLs[0]).height == source.height,
                 "Unknown explicit-page headers prevent a shared destructive crop")
@@ -892,8 +650,8 @@ struct StatusBarCropCheck {
             let nativeCut = Int(CaptureStatusBarDetector.bottom(in: raw, maximumBottom: floor(CGFloat(raw.height) * 0.075))!)
             require(try readImage(geoOn.outputURLs[index]).height - readImage(geoOff.outputURLs[index]).height == nativeCut,
                     "Each horizontal geometry independently proves its crop")
-            checkCleanStatusHeader(source: raw, output: try readImage(geoOn.outputURLs[index]),
-                label: "Horizontal geometry \(index) ON")
+            checkRawStatusHeader(source: raw, output: try readImage(geoOn.outputURLs[index]),
+                label: "Horizontal native geometry \(index) ON")
         }
         for (url, data) in originals {
             require(try Data(contentsOf: url) == data, "Horizontal source JPEGs remain byte-identical")
@@ -902,10 +660,10 @@ struct StatusBarCropCheck {
 
     private static func makeScrollFrames(in directory: URL, status: Bool, width: Int = 1206,
                                          height: Int = 2622, count: Int = 6, axis: CaptureAxis = .vertical,
-                                         headerOffset: Int = 0, headerMovement: Int = 0, earlyMovingRow: Bool = false,
+                                         headerOffset: CGFloat = 0, headerMovement: Int = 0, earlyMovingRow: Bool = false,
                                          background: HeaderBackground = .plain, indicator: Shape = .capsule,
                                          jpegQuality: CGFloat = 0.94, scrollOffsets: [Int]? = nil,
-                                         transientOpening: Bool = false, changedOpeningCandidatePixel: Bool = false) throws -> [URL] {
+                                         transientOpening: Bool = false) throws -> [URL] {
         precondition(scrollOffsets == nil || scrollOffsets?.count == count)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let format = UIGraphicsImageRendererFormat()
@@ -932,7 +690,7 @@ struct StatusBarCropCheck {
         return try (0..<count).map { index in
             // Different temporal headers expose accidentally detecting frame zero
             // instead of the source selected for the beginning of a reverse capture.
-            let temporalOffset = headerOffset + index * (axis == .vertical ? 2 : headerMovement)
+            let temporalOffset = headerOffset + CGFloat(index * (axis == .vertical ? 2 : headerMovement))
             let scrollOffset = scrollOffsets?[index] ?? index * 137
             let header = try makeHeader(width: width, height: height,
                 clockTop: status ? CGFloat(72 + temporalOffset) * scale : nil,
@@ -959,15 +717,7 @@ struct StatusBarCropCheck {
                 // A distinct native navigation band must survive directly below the status crop.
                 UIColor(red: 0.05, green: 0.55, blue: 0.93, alpha: 1).setFill()
                 context.fill(CGRect(x: 0, y: 178 * scale, width: CGFloat(width), height: 12 * scale))
-                if changedOpeningCandidatePixel && index == 1 {
-                    // Mutate one raw pixel before the only JPEG encoding. No
-                    // decode/re-encode pass can accidentally change the rest.
-                    UIColor.magenta.setFill()
-                    context.fill(CGRect(x: 600, y: 440, width: 1, height: 1))
-                }
                 if transientOpening && index == 0 {
-                    // This unfinished system animation crosses the196px prefix
-                    // boundary. A prefix-only replacement leaves a black tail.
                     let rect = CGRect(x: CGFloat(width) / 2 - 176 * scale, y: 32 * scale,
                         width: 352 * scale, height: 190 * scale)
                     context.cgContext.setFillColor(UIColor.black.cgColor)
@@ -1017,7 +767,21 @@ struct StatusBarCropCheck {
     /// No resizing: a missing row or a shifted title must remain visible to the oracle.
     private static func nativePixelError(_ first: CGImage, rect a: CGRect, _ second: CGImage, rect b: CGRect) -> Double {
         guard a.width == b.width, a.height == b.height, a.width > 0, a.height > 0 else { return .infinity }
-        let left = nativePixels(first, rect: a), right = nativePixels(second, rect: b)
+        func pixels(_ image: CGImage, _ rect: CGRect) -> [UInt8] {
+            guard let crop = image.cropping(to: rect), crop.width == Int(rect.width),
+                  crop.height == Int(rect.height) else { return [] }
+            var bytes = [UInt8](repeating: 0, count: crop.width * crop.height * 4)
+            let rendered = bytes.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(data: buffer.baseAddress, width: crop.width, height: crop.height,
+                    bitsPerComponent: 8, bytesPerRow: crop.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                context.interpolationQuality = .none
+                context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
+                return true
+            }
+            return rendered ? bytes : []
+        }
+        let left = pixels(first, a), right = pixels(second, b)
         guard left.count == right.count, !left.isEmpty else { return .infinity }
         var error = 0.0
         for index in left.indices where index % 4 != 3 {
@@ -1025,23 +789,7 @@ struct StatusBarCropCheck {
         }
         return error / Double(left.count / 4 * 3)
     }
-
 #endif
-
-    private static func nativePixels(_ image: CGImage, rect: CGRect) -> [UInt8] {
-        guard let crop = image.cropping(to: rect), crop.width == Int(rect.width),
-              crop.height == Int(rect.height), crop.width > 0, crop.height > 0 else { return [] }
-        var bytes = [UInt8](repeating: 0, count: crop.width * crop.height * 4)
-        let rendered = bytes.withUnsafeMutableBytes { buffer -> Bool in
-            guard let context = CGContext(data: buffer.baseAddress, width: crop.width, height: crop.height,
-                bitsPerComponent: 8, bytesPerRow: crop.width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
-            context.interpolationQuality = .none
-            context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
-            return true
-        }
-        return rendered ? bytes : []
-    }
 }
 
 private enum CheckError: Error { case image }

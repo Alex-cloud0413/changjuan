@@ -1,5 +1,7 @@
 # Clean status-bar export — 1.1.5 (50) device-test candidate
 
+> **Superseded and withdrawn at the user's request.** [Build 51](Validation-1.1.5-build51-raw-statusbar.md) removes all background repair and special opening selection. Keep status bar ON now preserves the captured status bar, including islands and recording controls. The evidence below records the historical Build 50 experiment only.
+
 ## Requested behavior
 
 The user accepted Build49 portrait OFF cropping, then reported malformed/recording islands with ON. An in-place1.1.3 (46) pre-Duo source comparison also retained sharp recording controls. Its source fingerprint matched the historical release; sampling/vertical rendering were unchanged, so a broad rollback was not an evidenced fix. The user explicitly clarified the desired output: keep captured time/battery and remove the whole island plus detached recording circle.
