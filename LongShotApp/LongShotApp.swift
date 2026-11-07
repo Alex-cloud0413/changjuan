@@ -38,14 +38,12 @@ private struct LongShotSceneRoot: View {
     }
 
     private func publishVisibility(_ phase: ScenePhase) {
-#if LONGSHOT_SCREEN_CAPTURE_KIT
-        if phase == .active { ScreenCaptureHostVisibility.shared.setForeground(true) }
-        else if phase == .background { ScreenCaptureHostVisibility.shared.setForeground(false) }
-#else
+#if !LONGSHOT_SCREEN_CAPTURE_KIT
         if phase == .active { ReplayBroadcastStore.setHostForeground(true) }
         else if phase == .background { ReplayBroadcastStore.setHostForeground(false) }
 #endif
-        // Inactive preserves visibility while a system consent sheet covers us.
+        // SCK uses the actual UIWindowScene below, including an initially
+        // inactive scene. A SwiftUI phase can arrive before any window exists.
     }
 }
 
@@ -54,22 +52,33 @@ private struct CaptureHostWindowObserver: UIViewRepresentable {
     func updateUIView(_ view: Observer, context: Context) { view.setNeedsLayout() }
 
     final class Observer: UIView {
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification,
+                         UIScene.didEnterBackgroundNotification, UIScene.willEnterForegroundNotification,
+                         UIScene.didDisconnectNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(sceneStateChanged(_:)), name: name, object: nil)
+            }
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        deinit { NotificationCenter.default.removeObserver(self) }
         override func didMoveToWindow() { super.didMoveToWindow(); updateCaptureScope() }
         override func layoutSubviews() { super.layoutSubviews(); updateCaptureScope() }
+
+        @objc private func sceneStateChanged(_ notification: Notification) {
+            guard let scene = notification.object as? UIWindowScene, scene === window?.windowScene else { return }
+            updateCaptureScope()
+        }
+
         private func updateCaptureScope() {
 #if LONGSHOT_SCREEN_CAPTURE_KIT
             guard let window, let scene = window.windowScene else { return }
-            // In split view an unfocused scene can be visible without ever
-            // becoming active. Visibility is stricter than permission to prompt.
-            ScreenCaptureHostVisibility.shared.setSceneActivationState(scene.activationState)
             // This answers only whether *our own UI* occupies part of the
             // captured display. Never use these bounds to crop the target app.
             let display = scene.screen.coordinateSpace
-            let visible = window.convert(window.bounds, to: display)
-            let full = display.bounds
-            let partial = abs(visible.minX - full.minX) > 1 || abs(visible.minY - full.minY) > 1
-                || abs(visible.width - full.width) > 1 || abs(visible.height - full.height) > 1
-            ScreenCaptureHostVisibility.shared.setPartialWindow(partial)
+            let frame = scene.coordinateSpace.convert(scene.coordinateSpace.bounds, to: display)
+            ScreenCaptureHostVisibility.shared.updateScene(activationState: scene.activationState,
+                frameInDisplay: frame, displayBounds: display.bounds)
 #endif
         }
     }

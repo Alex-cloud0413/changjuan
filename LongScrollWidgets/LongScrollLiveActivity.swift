@@ -50,18 +50,26 @@ struct LongScrollLiveActivity: Widget {
             } compactLeading: {
                 Image(systemName: statusSymbol(for: context.state.phase))
                     .foregroundStyle(statusColor(for: context.state.phase))
+                    .accessibilityHidden(true)
             } compactTrailing: {
                 Image(systemName: context.state.phase == .capturing ? "ellipsis" : statusSymbol(for: context.state.phase))
                     .foregroundStyle(statusColor(for: context.state.phase))
                     .accessibilityLabel(statusTitle(for: context.state))
-                    .accessibilityHint(context.state.language.text("长按灵动岛，显示接下一页、继续和完成按钮"))
+                    .accessibilityHint(actionHint(for: context.state))
             } minimal: {
                 Image(systemName: statusSymbol(for: context.state.phase))
                     .foregroundStyle(statusColor(for: context.state.phase))
+                    .accessibilityLabel(statusTitle(for: context.state))
+                    .accessibilityHint(actionHint(for: context.state))
             }
             .widgetURL(URL(string: "longshot://capture"))
             .keylineTint(statusColor(for: context.state.phase))
         }
+    }
+
+    private func actionHint(for state: LongScrollActivityAttributes.ContentState) -> String {
+        guard state.phase == .capturing || state.phase == .paused else { return "" }
+        return state.language.text("长按灵动岛，显示接下一页、继续和完成按钮")
     }
 
     private func statusTitle(

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import UIKit
 import Vision
 
@@ -10,6 +11,7 @@ enum StitchError: LocalizedError {
     case couldNotEncode
     case unusablePage(Int)
     case unseenGap
+    case occludedOpening
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +29,8 @@ enum StitchError: LocalizedError {
             return "第 \(number) 页没有采集到可连续拼接的内容。请在切换后点「继续」，再缓慢滚动；原始画面已保留。"
         case .unseenGap:
             return "有一段内容缺少重叠画面，无法完整拼接。请放慢滚动速度后重试；原始画面已保留。"
+        case .occludedOpening:
+            return "展开的灵动岛遮住了顶部内容。请等灵动岛收起后再开始滚动，原始画面已保留。"
         }
     }
 }
@@ -53,6 +57,7 @@ struct StitchTimings: Codable {
 final class FrameStitcher {
 #if LONGSHOT_CAPTURE_CHECKS
     nonisolated(unsafe) static var alignmentTrace: ((String) -> Void)?
+    nonisolated(unsafe) static var testBeforeOutputCommit: ((URL) throws -> Void)?
 #endif
     private struct Piece {
         let frameURL: URL?
@@ -412,12 +417,16 @@ final class FrameStitcher {
                   geometrySegments.map(\.startFrame) == geometrySegments.map(\.startFrame).sorted() else {
                 throw StitchError.inconsistentFrameSize
             }
-            for record in geometrySegments {
-                guard starts.contains(record.startFrame) else { throw StitchError.inconsistentFrameSize }
+            for (index, record) in geometrySegments.enumerated() {
+                guard starts.contains(record.startFrame), record.pixelWidth > 0, record.pixelHeight > 0,
+                      (1...8).contains(record.videoOrientation) else { throw StitchError.inconsistentFrameSize }
                 let expected = options.axis == .horizontal
                     ? CGSize(width: record.pixelHeight, height: record.pixelWidth)
                     : CGSize(width: record.pixelWidth, height: record.pixelHeight)
-                guard expected == samples[record.startFrame].imageSize else { throw StitchError.inconsistentFrameSize }
+                let end = index + 1 < geometrySegments.count ? geometrySegments[index + 1].startFrame : samples.count
+                guard end <= samples.count, (record.startFrame..<end).allSatisfy({ samples[$0].imageSize == expected }) else {
+                    throw StitchError.inconsistentFrameSize
+                }
             }
         }
         var groupStarts = [0]
@@ -456,16 +465,17 @@ final class FrameStitcher {
                 segmentStarts: localStarts, started: groupStarted, sampled: groupStarted, preparedFrameCount: 0,
                 allowsStaticPages: true))
         }
-        let outputDirectory = try CaptureStorage.outputsDirectory(in: sessionURL)
-        try removeOldOutputs(from: outputDirectory)
+        let pendingOutputs = staging.appendingPathComponent("complete", isDirectory: true)
+        try files.createDirectory(at: pendingOutputs, withIntermediateDirectories: false)
         var outputs: [URL] = []
         for result in results {
             for source in result.outputURLs {
-                let destination = outputDirectory.appendingPathComponent(String(format: "longshot-%02d.jpg", outputs.count + 1))
+                let destination = pendingOutputs.appendingPathComponent(String(format: "longshot-%02d.jpg", outputs.count + 1))
                 try files.moveItem(at: source, to: destination)
                 outputs.append(destination)
             }
         }
+        outputs = try publishOutputs(from: pendingOutputs, in: sessionURL)
         return StitchResult(outputURLs: outputs,
             acceptedFrameCount: results.reduce(0) { $0 + $1.acceptedFrameCount },
             skippedFrameCount: results.reduce(0) { $0 + $1.skippedFrameCount },
@@ -514,8 +524,28 @@ final class FrameStitcher {
             for range in ranges {
                 let indices = range.filter { !samples[$0].isSystemPanel }
                 var identity: HorizontalIdentityBand?
+                let maximumStatusBand = floor(width * 0.075)
+                var analysisStatusHeight = min(maximumStatusBand, ceil(width * max(0, topCropRatio)))
+                if topCropRatio == 0, let firstIndex = indices.first,
+                   let image = UIImage(contentsOfFile: samples[firstIndex].url.path)?.cgImage,
+                   let anchor = CaptureStatusBarDetector.bottom(in: image, maximumBottom: maximumStatusBand) {
+                    // Prove the clock once; inspect each later capsule's exact
+                    // native extent without OCR. This avoids treating compact
+                    // system animation as moving column identities, while rows
+                    // immediately below the observed band remain moving content.
+                    var observed = anchor
+                    for index in indices.dropFirst() {
+                        let bottom: CGFloat? = autoreleasepool {
+                            guard let image = UIImage(contentsOfFile: samples[index].url.path)?.cgImage else { return nil }
+                            return CaptureStatusBarDetector.capsuleBottom(in: image, maximumBottom: maximumStatusBand)
+                        }
+                        guard let bottom else { observed = 0; break }
+                        observed = max(observed, bottom)
+                    }
+                    analysisStatusHeight = observed
+                }
                 let detected = try HorizontalGridRegistration.detect(indices.map { samples[$0].url },
-                    height: Int(width), statusHeight: Int(min(floor(width * 0.075), ceil(width * max(0, topCropRatio)))),
+                    height: Int(width), statusHeight: Int(analysisStatusHeight),
                     identityBand: &identity)
                 guard let registration = detected else {
                     if let identity {
@@ -868,9 +898,10 @@ final class FrameStitcher {
                     grid: gridByIndex[indices[0]])
             }
             let segment = try makeSegmentPieces(
-                positioned: positioned, samples: samples,
+                positioned: positioned, observed: indices, samples: samples,
                 contentTop: options.axis == .horizontal ? CGFloat(motionByIndex[indices[0]]?.frozenLeadingPixels ?? 0) : contentTop,
-                contentBottom: contentBottom, outputTop: outputTop, width: width, height: height
+                contentBottom: contentBottom, outputTop: outputTop, width: width, height: height,
+                detectsStatusBar: topCropRatio == 0
             ).map { piece -> Piece in
                 var result = piece
                 if options.axis == .horizontal { result.segmentID = pageIndex }
@@ -890,14 +921,14 @@ final class FrameStitcher {
             }
             pieces.append(contentsOf: segment)
             let sources = Set(segment.compactMap(\.frameURL))
-            for frame in positioned where sources.contains(samples[frame.index].url) { usedFrames.insert(frame.index) }
+            for index in indices where sources.contains(samples[index].url) { usedFrames.insert(index) }
         }
         guard !pieces.isEmpty else { throw StitchError.noUsableMovement }
 
         let pages = paginate(pieces: pieces, maximumHeight: maximumOutputHeight)
-        let outputDirectory = try CaptureStorage.outputsDirectory(in: sessionURL)
-        try removeOldOutputs(from: outputDirectory)
-
+        let outputDirectory = sessionURL.appendingPathComponent(".render-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outputDirectory) }
         var outputURLs: [URL] = []
         var omittedOccludedBottomRows = false
         let assembled = ProcessInfo.processInfo.systemUptime
@@ -915,6 +946,7 @@ final class FrameStitcher {
             outputURLs.append(outputURL)
         }
 
+        outputURLs = try publishOutputs(from: outputDirectory, in: sessionURL)
         return StitchResult(
             outputURLs: outputURLs,
             acceptedFrameCount: usedFrames.count,
@@ -1073,8 +1105,9 @@ final class FrameStitcher {
     }
 
     private func makeSegmentPieces(
-        positioned: [PositionedFrame], samples: [FrameSample], contentTop: CGFloat,
-        contentBottom: CGFloat, outputTop: CGFloat, width: CGFloat, height: CGFloat
+        positioned: [PositionedFrame], observed: [Int], samples: [FrameSample], contentTop: CGFloat,
+        contentBottom: CGFloat, outputTop: CGFloat, width: CGFloat, height: CGFloat,
+        detectsStatusBar: Bool
     ) throws -> [Piece] {
         let contentHeight = Int(contentBottom - contentTop)
         var coverage: [FrameCoverage] = positioned.map { frame in
@@ -1090,22 +1123,139 @@ final class FrameStitcher {
             return options.axis == .horizontal
                 ? $0.frame.index > $1.frame.index : $0.frame.index < $1.frame.index
         }
-        guard let first = coverage.first else { return [] }
+        guard !coverage.isEmpty else { return [] }
+        let recoversOpening = detectsStatusBar && options.axis == .vertical && !options.keepsStatusBar
+        let prefersClearStatus = detectsStatusBar && options.axis == .vertical && options.keepsStatusBar
+        var replacements: [Int: (url: URL, cut: CGFloat)] = [:]
+        var inspected = Set<Int>()
+        var expanded: [Int: CGRect] = [:]
+
+        func openingCandidates(for frame: PositionedFrame) -> ArraySlice<Int> {
+            let positions = Dictionary(uniqueKeysWithValues: positioned.map { ($0.index, $0.offset) })
+            return observed.filter { index in
+                index != frame.index && samples[index].coveredTop == 0
+                    && (positions[index].map { $0 == frame.offset } ?? (abs(index - frame.index) <= 12))
+            }.sorted { abs($0 - frame.index) < abs($1 - frame.index) }.prefix(24)
+        }
+
+        func preferredStatusSource(for frame: PositionedFrame) -> URL? {
+            guard prefersClearStatus,
+                  let opening = UIImage(contentsOfFile: samples[frame.index].url.path)?.cgImage,
+                  let original = CaptureStatusBarDetector.presentation(in: opening, maximumBottom: contentTop) else { return nil }
+            var bestSource: URL?
+            var bestDetail = 0.0
+            for index in openingCandidates(for: frame) {
+                let source = samples[index].url
+                let detail: Double? = autoreleasepool {
+                    guard let candidate = UIImage(contentsOfFile: source.path)?.cgImage,
+                          let status = CaptureStatusBarDetector.presentation(in: candidate, maximumBottom: contentTop),
+                          status.hasDetachedRecordingBubble,
+                          status.clockDetail > 0, status.rightDetail > 0 else { return nil }
+                    let clock = status.clockDetail / max(original.clockDetail, 0.000001)
+                    let right = status.rightDetail / max(original.rightDetail, 0.000001)
+                    let statusBottom = max(original.bottom, status.bottom)
+                    guard min(clock, right) >= 0.95,
+                          !original.hasDetachedRecordingBubble || max(clock, right) >= 1.15,
+                          clock + right > bestDetail,
+                          CaptureStatusBarDetector.preservesBatteryDetail(opening, candidate, statusBottom: statusBottom),
+                          SameOpeningViewport.isSameViewport(opening, candidate,
+                              statusBottom: statusBottom, contentTop: contentTop, contentBottom: contentBottom),
+                          CaptureStatusBarDetector.bottom(in: candidate, maximumBottom: statusBottom) != nil else { return nil }
+                    return clock + right
+                }
+                if let detail {
+                    bestSource = source
+                    bestDetail = detail
+                }
+            }
+            return bestSource
+        }
+
+        func recoveredSource(for frame: PositionedFrame, sourceTop: CGFloat) throws -> (url: URL, cut: CGFloat)? {
+            guard recoversOpening, sourceTop < CaptureOverlayDetector.expandedIslandSearchDepth(width: width) else { return nil }
+            if let recovered = replacements[frame.index] { return recovered }
+            if inspected.contains(frame.index), (expanded[frame.index]?.maxY ?? 0) <= sourceTop { return nil }
+            return try autoreleasepool {
+                guard let covered = UIImage(contentsOfFile: samples[frame.index].url.path)?.cgImage else {
+                    throw StitchError.unreadableFrame(samples[frame.index].url)
+                }
+                let occlusion = expanded[frame.index] ?? CaptureOverlayDetector.expandedIslandCandidate(in: covered)
+                inspected.insert(frame.index)
+                expanded[frame.index] = occlusion
+                guard let occlusion, occlusion.maxY > sourceTop else { return nil }
+
+                // Only a bounded number of native comparisons can run while
+                // the app is processing in the background.
+                for index in openingCandidates(for: frame) {
+                    let source = samples[index].url
+                    let cut: CGFloat? = autoreleasepool {
+                        guard let candidate = UIImage(contentsOfFile: source.path)?.cgImage,
+                              CaptureOverlayDetector.expandedIslandCandidate(in: candidate) == nil,
+                              let cut = CaptureStatusBarDetector.bottom(in: candidate, maximumBottom: contentTop,
+                                  allowsClocklessRecording: true),
+                              SameOpeningViewport.isSameViewport(covered, candidate, occlusion: occlusion,
+                                  contentTop: cut, contentBottom: contentBottom) else { return nil }
+                        return cut
+                    }
+                    if let cut {
+                        let recovered = (url: source, cut: cut)
+                        replacements[frame.index] = recovered
+                        return recovered
+                    }
+                }
+                throw StitchError.occludedOpening
+            }
+        }
+
+        // An already-masked opening may otherwise start below the original
+        // viewport. Recover its complete observed extent before making pieces.
+        if recoversOpening, let opening = positioned.min(by: {
+            $0.offset == $1.offset ? $0.index < $1.index : $0.offset < $1.offset
+        }), coverage[0].start > opening.offset {
+            guard try recoveredSource(for: opening, sourceTop: 0) != nil else {
+                throw StitchError.occludedOpening
+            }
+            coverage.insert(FrameCoverage(frame: opening, start: opening.offset,
+                end: opening.offset + contentHeight), at: 0)
+        }
+        let first = coverage[0]
         var pieces: [Piece] = []
         var cursor = first.start
         var last = first
-        if first.start == first.frame.offset, samples[first.frame.index].coveredTop <= outputTop, outputTop < contentTop {
-            pieces.append(Piece(frameURL: samples[first.frame.index].url, sourceRect: CGRect(
-                x: 0, y: outputTop, width: width, height: contentTop - outputTop
-            )))
+        var preferredOpeningURL: URL?
+        if first.start == first.frame.offset, outputTop < contentTop {
+            let recovered = try recoveredSource(for: first.frame, sourceTop: outputTop)
+            if recovered != nil || samples[first.frame.index].coveredTop <= outputTop {
+                // Use the chosen original frame for both the prefix and its
+                // body rows. Status pixels are never pasted from a separate view.
+                preferredOpeningURL = preferredStatusSource(for: first.frame)
+                let source = recovered?.url ?? preferredOpeningURL ?? samples[first.frame.index].url
+                var prefixTop = outputTop
+                // Zero means no externally supplied boundary. Inspect the
+                // actual selected JPEG for the removable compact status band.
+                if let recovered {
+                    prefixTop = recovered.cut
+                } else if recoversOpening,
+                   let image = UIImage(contentsOfFile: source.path)?.cgImage,
+                   let bottom = CaptureStatusBarDetector.bottom(in: image, maximumBottom: contentTop,
+                                                                allowsClocklessRecording: true) {
+                    prefixTop = bottom
+                }
+                pieces.append(Piece(frameURL: source, sourceRect: CGRect(
+                    x: 0, y: prefixTop, width: width, height: contentTop - prefixTop
+                )))
+            }
         }
         for item in coverage {
             // Never stitch across unseen content by inventing a connecting strip.
             // Explicit page boundaries are the only place a separator is inserted.
             if item.start > cursor { throw StitchError.unseenGap }
             guard item.end > cursor else { continue }
-            pieces.append(Piece(frameURL: samples[item.frame.index].url, sourceRect: CGRect(
-                x: 0, y: contentTop + CGFloat(cursor - item.frame.offset),
+            let sourceTop = contentTop + CGFloat(cursor - item.frame.offset)
+            let recovered = try recoveredSource(for: item.frame, sourceTop: sourceTop)
+            let preferred = item.frame.index == first.frame.index ? preferredOpeningURL : nil
+            pieces.append(Piece(frameURL: recovered?.url ?? preferred ?? samples[item.frame.index].url, sourceRect: CGRect(
+                x: 0, y: sourceTop,
                 width: width, height: CGFloat(item.end - cursor)
             )))
             cursor = item.end
@@ -1285,13 +1435,19 @@ final class FrameStitcher {
             throw StitchError.couldNotEncode
         }
         try data.write(to: outputURL, options: .atomic)
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+        // Only the literal first piece maps to destination y=0. Other pages,
+        // separators and cropped prefixes must not be paired with frame zero.
+        if let first = page.first, let sourceURL = first.frameURL, let canvas = image.cgImage {
+            StatusCaptureQualityDiagnostics.exported(image: canvas, encodedOutput: data,
+                sourceURL: sourceURL, sourceRect: first.sourceRect, outputURL: outputURL)
+        }
+#endif
     }
 
     private func renderHorizontal(page: [Piece], originalHeight: CGFloat, topCropRatio: Double,
         plans: [Int: HorizontalSegmentPlan] = [:], bottomCuts: [Int: CGFloat] = [:], to outputURL: URL) throws -> Bool {
         let width = page.reduce(CGFloat(0)) { $0 + $1.sourceRect.height }
-        let statusHeight = min(floor(originalHeight * 0.075), ceil(originalHeight * max(0, topCropRatio)))
-        let headerHeight = options.keepsStatusBar ? statusHeight : 0
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = true
@@ -1304,6 +1460,24 @@ final class FrameStitcher {
             if groups.last?.last?.frameURL == nil { groups.append([]) }
             groups[groups.count - 1].append(piece)
         }
+        let statusHeight: CGFloat
+        if topCropRatio == 0 {
+            // Matching uses transposed samples; chrome evidence must come from
+            // the selected original JPEGs. A common crop is safe only when each
+            // explicit page on this output proves that band independently.
+            let detected = groups.filter { $0.first?.frameURL != nil }.map { group -> CGFloat in
+                guard let url = group.first?.frameURL,
+                      let image = UIImage(contentsOfFile: url.path)?.cgImage else { return 0 }
+                return CaptureStatusBarDetector.bottom(in: image, maximumBottom: floor(originalHeight * 0.075)) ?? 0
+            }
+            let common = detected.first ?? 0
+            // Different proven extents cannot share a crop: the smaller cut
+            // would bisect another page's capsule, and the larger can cut content.
+            statusHeight = common > 0 && detected.allSatisfy { $0 == common } ? common : 0
+        } else {
+            statusHeight = min(floor(originalHeight * 0.075), ceil(originalHeight * max(0, topCropRatio)))
+        }
+        let headerHeight = options.keepsStatusBar ? statusHeight : 0
         let registrations = groups.map { group in
             group.first?.segmentID.flatMap { plans[$0]?.grid }
         }
@@ -1842,15 +2016,33 @@ final class FrameStitcher {
         return (max(statusHeight, top - 2), max(0, bottom - 2))
     }
 
-    private func removeOldOutputs(from directory: URL) throws {
-        let files = try FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )
-        for file in files where ["jpg", "jpeg", "png"].contains(file.pathExtension.lowercased()) {
-            try FileManager.default.removeItem(at: file)
+    /// Publish a complete page set with one filesystem swap. Until this succeeds,
+    /// existing outputs remain readable even if a later render or commit fails.
+    private func publishOutputs(from pending: URL, in sessionURL: URL) throws -> [URL] {
+        let files = FileManager.default
+        let outputDirectory = sessionURL.appendingPathComponent(CaptureConstants.outputsDirectoryName, isDirectory: true)
+        let names = try files.contentsOfDirectory(at: pending, includingPropertiesForKeys: nil)
+            .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }
+            .map(\.lastPathComponent).sorted { $0.compare($1, options: .numeric) == .orderedAscending }
+        guard !names.isEmpty else { throw StitchError.couldNotEncode }
+        let exists = files.fileExists(atPath: outputDirectory.path)
+        if exists {
+            // Previous behavior retained unrelated sidecars in Outputs.
+            for item in try files.contentsOfDirectory(at: outputDirectory, includingPropertiesForKeys: nil)
+                where !["jpg", "jpeg", "png"].contains(item.pathExtension.lowercased()) {
+                try files.copyItem(at: item, to: pending.appendingPathComponent(item.lastPathComponent))
+            }
         }
+#if LONGSHOT_CAPTURE_CHECKS
+        try Self.testBeforeOutputCommit?(pending)
+#endif
+        let result = exists
+            ? renameatx_np(AT_FDCWD, pending.path, AT_FDCWD, outputDirectory.path, UInt32(RENAME_SWAP))
+            : rename(pending.path, outputDirectory.path)
+        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        // With RENAME_SWAP, pending now contains only the previous output set.
+        if exists { try? files.removeItem(at: pending) }
+        return names.map { outputDirectory.appendingPathComponent($0) }
     }
 }
 
@@ -2047,9 +2239,539 @@ private enum HorizontalScrollMatcher {
 
 }
 
+/// Captured-pixel evidence for a compact top status bar. This is deliberately
+/// separate from activity occlusion: a normal compact pill is usable input.
+/// Unknown layouts retain their pixels. Never infer another app's safe area.
+enum CaptureStatusBarDetector {
+    struct Presentation {
+        let hasDetachedRecordingBubble: Bool
+        let bottom: CGFloat
+        let clockDetail: Double
+        let rightDetail: Double
+    }
+
+    private struct Capsule {
+        let band: Int
+        let top: CGFloat
+        let bottom: CGFloat
+        let padding: CGFloat
+        let isClocklessRecording: Bool
+        let left: CGFloat
+        let right: CGFloat
+        let hasDetachedRecordingBubble: Bool
+    }
+
+    private static func capsule(in image: CGImage, maximumBottom: CGFloat,
+                                allowsClocklessRecording: Bool = false) -> Capsule? {
+        let nativeWidth = CGFloat(image.width)
+        guard image.height > image.width * 3 / 2, nativeWidth >= 200,
+              maximumBottom.isFinite, maximumBottom > 0 else { return nil }
+        let band = min(image.height, Int(ceil(nativeWidth * 0.18)))
+        guard let top = image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: band)) else { return nil }
+        let width = 256, height = max(1, Int(ceil(CGFloat(band) * 256 / nativeWidth)))
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.draw(top, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { return nil }
+        func light(_ x: Int, _ y: Int) -> Int {
+            let i = (y * width + x) * 4
+            return max(Int(pixels[i]), Int(pixels[i + 1]), Int(pixels[i + 2]))
+        }
+        struct Blob {
+            var left: Int; var right: Int; var low: Int; var high: Int; var count: Int
+            var w: Int { right - left + 1 }; var h: Int { high - low + 1 }
+
+            func enclosesCenteredCore(_ other: Blob) -> Bool {
+                left < other.left && other.right < right && low < other.low && other.high < high
+                    && other.w * 2 <= w && other.h * 2 <= h
+                    && abs((left + right) - (other.left + other.right)) <= w / 4
+                    && abs((low + high) - (other.low + other.high)) <= h / 4
+            }
+
+        }
+        func components(_ mask: [Bool]) -> [Blob] {
+            var mask = mask, result: [Blob] = []
+            for start in mask.indices where mask[start] {
+                var queue = [start], cursor = 0
+                var box = Blob(left: start % width, right: start % width,
+                               low: start / width, high: start / width, count: 0)
+                mask[start] = false
+                while cursor < queue.count {
+                    let i = queue[cursor]; cursor += 1
+                    let x = i % width, y = i / width
+                    box.left = min(box.left, x); box.right = max(box.right, x)
+                    box.low = min(box.low, y); box.high = max(box.high, y)
+                    for (xx, yy) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                        where xx >= 0 && xx < width && yy >= 0 && yy < height {
+                        let j = yy * width + xx
+                        if mask[j] { mask[j] = false; queue.append(j) }
+                    }
+                }
+                box.count = queue.count
+                if box.count >= 5 { result.append(box) }
+            }
+            return result
+        }
+        let marks = components((0..<(width * height)).map { index in
+            let i = index * 4
+            let r = Int(pixels[i]), g = Int(pixels[i + 1]), b = Int(pixels[i + 2])
+            return r > 60 && Double(r) > Double(g) * 1.5 && Double(r) > Double(b) * 1.5 && g < 100 && b < 100
+        })
+        func recordingMark(in box: Blob, darkCenter: Bool, alignedWith main: Blob? = nil,
+                           allowRingEdgeSamples: Bool = false) -> Bool {
+            marks.contains { mark in
+                let x = (mark.left + mark.right) / 2, y = (mark.low + mark.high) / 2
+                let referenceHeight = main?.h ?? box.h
+                guard mark.w >= 3, mark.h >= 3, mark.w <= referenceHeight * 2 / 3, mark.h <= referenceHeight * 2 / 3,
+                      mark.w * 2 >= mark.h, mark.h * 2 >= mark.w,
+                      mark.left > box.left, mark.right < box.right,
+                      mark.low > box.low, mark.high < box.high else { return false }
+                if let main {
+                    guard x > main.right, x - main.right <= main.h * 2,
+                          y >= main.low - main.h / 3, y <= main.high + main.h / 3 else { return false }
+                } else {
+                    guard y >= box.low + box.h / 5, y <= box.high - box.h / 5 else { return false }
+                }
+                guard darkCenter else { return true }
+                guard x < box.left + box.w / 3 || x > box.right - box.w / 3 else { return false }
+                let center = (-1...1).flatMap { yy in (-1...1).map { xx in light(x + xx, y + yy) } }
+                if allowRingEdgeSamples {
+                    return center[4] < 40 && center.filter { $0 < 40 }.count >= 5
+                }
+                return center.reduce(0, +) / center.count < 40
+            }
+        }
+        func hasSurround(_ box: Blob, photographic: Bool, threshold: Int) -> Bool {
+            guard box.left >= 2, box.right + 2 < width, box.low >= 2, box.high + 2 < height else { return false }
+            let midX = (box.left + box.right) / 2, midY = (box.low + box.high) / 2
+            let outside = [light(box.left - 2, midY), light(box.right + 2, midY),
+                           light(midX, box.low - 2), light(midX, box.high + 2)]
+            if !photographic { return outside.allSatisfy { $0 > 100 } }
+            let interior = (box.low...box.high).flatMap { y in (box.left...box.right).compactMap { x -> Int? in
+                let value = light(x, y); return value < threshold ? value : nil
+            } }
+            guard !interior.isEmpty else { return false }
+            let black = interior.reduce(0, +) / interior.count
+            return outside.allSatisfy { $0 - black >= 24 }
+        }
+        func rounded(_ box: Blob, threshold: Int) -> Bool {
+            func span(_ y: Int) -> Int {
+                let xs = (box.left...box.right).filter { light($0, y) < threshold }
+                return xs.last.map { $0 - xs.first! + 1 } ?? 0
+            }
+            let upper = span(box.low + 1), lower = span(box.high - 1)
+            return span((box.low + box.high) / 2) >= box.w * 9 / 10
+                && upper > box.w / 3 && lower > box.w / 3
+                && upper < box.w * 97 / 100 && lower < box.w * 97 / 100
+        }
+        func hasQuietSurround(main: Blob, bubble: Blob, cut: Int) -> Bool {
+            // When iOS omits the clock and right-side icons, prove the whole
+            // removable band has a quiet background around the two indicators.
+            // Check the native rows so a thin app divider cannot disappear
+            // during shape analysis. Round the one-sample contour halo outward.
+            guard cut > 0, cut <= band,
+                  let strip = image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: cut)) else { return false }
+            let rowBytes = image.width * 4
+            var nativePixels = [UInt8](repeating: 0, count: rowBytes * cut)
+            let rendered = nativePixels.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(data: buffer.baseAddress, width: image.width, height: cut,
+                    bitsPerComponent: 8, bytesPerRow: rowBytes, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+                context.interpolationQuality = .none
+                context.draw(strip, in: CGRect(x: 0, y: 0, width: image.width, height: cut))
+                return true
+            }
+            guard rendered else { return false }
+            let scaleX = nativeWidth / CGFloat(width), scaleY = CGFloat(band) / CGFloat(height)
+            func halo(_ box: Blob) -> (columns: Range<Int>, rows: Range<Int>) {
+                let left = Int(floor(CGFloat(box.left - 1) * scaleX))
+                let right = Int(ceil(CGFloat(box.right + 2) * scaleX))
+                let top = Int(floor(CGFloat(box.low - 1) * scaleY))
+                let bottom = Int(ceil(CGFloat(box.high + 2) * scaleY))
+                return (left..<right, top..<bottom)
+            }
+            let mainHalo = halo(main), bubbleHalo = halo(bubble)
+            for y in 0..<cut {
+                let inMainRows = mainHalo.rows.contains(y), inBubbleRows = bubbleHalo.rows.contains(y)
+                for x in 0..<image.width where !(inMainRows && mainHalo.columns.contains(x))
+                    && !(inBubbleRows && bubbleHalo.columns.contains(x)) {
+                    let offset = y * rowBytes + x * 4
+                    for channel in 0..<3 where abs(Int(nativePixels[offset + channel]) - Int(nativePixels[channel])) > 16 {
+                        return false
+                    }
+                }
+            }
+            return true
+        }
+        func detect(threshold: Int, photographic: Bool) -> Capsule? {
+            let blobs = components((0..<(width * height)).map { light($0 % width, $0 / width) < threshold })
+            let candidates = blobs.filter { box in
+                box.w >= 62 && box.w <= 174 && box.h >= 13 && box.h <= 39
+                    && box.low >= 2 && box.low <= 17 && box.high + 2 < height
+                    && abs((box.left + box.right) / 2 - width / 2) <= 20
+                    && box.w >= box.h * 3 && box.count * 100 >= box.w * box.h * 65
+                    && hasSurround(box, photographic: photographic, threshold: threshold)
+                    && rounded(box, threshold: threshold)
+                    && (!photographic || recordingMark(in: box, darkCenter: true))
+            }
+            guard candidates.count == 1, let main = candidates.first else { return nil }
+            // A separate recording circle may sit lower than the main island.
+            // Include its entire proved contour, or retain the whole prefix.
+            let markedBubbles = blobs.filter { box in
+                box.left > main.right && box.left - main.right <= main.h
+                    && recordingMark(in: box, darkCenter: false, alignedWith: main)
+            }
+            // A bright recording ring can separate its own dark interior
+            // from the outer black circle. Its red core marks that interior
+            // too, but a fully enclosed component is part of the same bubble.
+            let bubbles = markedBubbles.filter { box in
+                !markedBubbles.contains { $0.enclosesCenteredCore(box) }
+            }
+            // A plausible recording endcap with an uncertain outline cannot
+            // be ignored: cropping only the main capsule would cut through it.
+            guard bubbles.count <= 1, bubbles.allSatisfy({
+                $0.h >= 13 && $0.h <= 39 && $0.w * 4 >= $0.h * 3 && $0.w * 3 <= $0.h * 4
+                    && abs(($0.low + $0.high) - (main.low + main.high)) <= main.h
+                    && $0.count * 100 >= $0.w * $0.h * 50
+                    && hasSurround($0, photographic: photographic, threshold: threshold) && rounded($0, threshold: threshold)
+            }) else { return nil }
+            let bottom = max(main.high, bubbles.first?.high ?? main.high)
+            let scaleY = CGFloat(band) / CGFloat(height)
+            let scaleX = nativeWidth / CGFloat(width)
+            let nativeBottom = CGFloat(bottom + 1) * scaleY
+            let padding = max(2, scaleX)
+            let cut = ceil(nativeBottom + padding)
+            guard cut <= maximumBottom else { return nil }
+            let hasDetachedRecordingBubble = bubbles.first != nil
+                && recordingMark(in: main, darkCenter: true, allowRingEdgeSamples: true)
+            let isClocklessRecording = allowsClocklessRecording && (bubbles.first.map { bubble in
+                recordingMark(in: main, darkCenter: true, allowRingEdgeSamples: true)
+                    && markedBubbles.contains { bubble.enclosesCenteredCore($0) }
+                    && hasQuietSurround(main: main, bubble: bubble, cut: Int(cut))
+            } ?? false)
+            return Capsule(band: band, top: CGFloat(main.low) * scaleY,
+                bottom: nativeBottom, padding: padding, isClocklessRecording: isClocklessRecording,
+                left: CGFloat(main.left) * scaleX,
+                right: CGFloat(max(main.right, bubbles.first?.right ?? main.right) + 1) * scaleX,
+                hasDetachedRecordingBubble: hasDetachedRecordingBubble)
+        }
+        // Preserve the original neutral-background route. Photography requires
+        // stricter black geometry plus recording-ring evidence and local contrast.
+        return detect(threshold: 65, photographic: false) ?? detect(threshold: 24, photographic: true)
+    }
+
+    /// Geometry only, after a page's first native frame has proved its status band.
+    /// Later compact-capsule motion needs no repeated OCR or arbitrary safe area.
+    static func capsuleBottom(in image: CGImage, maximumBottom: CGFloat) -> CGFloat? {
+        guard let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
+        return ceil(evidence.bottom + evidence.padding)
+    }
+
+    /// Compare original status bands only after the caller has matched the viewport.
+    /// The scores describe visible edge detail in the native clock and battery lanes.
+    static func presentation(in image: CGImage, maximumBottom: CGFloat) -> Presentation? {
+        guard image.width <= 4096, let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
+        let width = CGFloat(image.width)
+        let middle = (evidence.top + evidence.bottom) / 2
+        let half = min((evidence.bottom - evidence.top) * 0.44, width * 0.041)
+        let top = floor(middle - half), bottom = ceil(middle + half)
+        func detail(from left: CGFloat, to right: CGFloat, minimumSpan: CGFloat) -> Double {
+            let x = ceil(left), end = floor(right)
+            guard end > x else { return 0 }
+            return statusLaneDetail(in: image, rect: CGRect(x: x, y: top, width: end - x, height: bottom - top),
+                                    minimumSpan: Int(ceil(minimumSpan)))
+        }
+        let clock = detail(from: width * 0.045, to: min(width * 0.25, evidence.left - width * 0.012),
+                           minimumSpan: width * 0.035)
+        let right = detail(from: max(width * 0.84, evidence.right + width * 0.018), to: width * 0.965,
+                           minimumSpan: width * 0.024)
+        return Presentation(hasDetachedRecordingBubble: evidence.hasDetachedRecordingBubble,
+            bottom: ceil(evidence.bottom + evidence.padding), clockDetail: clock, rightDetail: right)
+    }
+
+    private static func statusLaneDetail(in image: CGImage, rect: CGRect, minimumSpan: Int) -> Double {
+        let width = Int(rect.width), height = Int(rect.height)
+        let reach = max(1, Int(round(Double(image.width) / 600)))
+        guard width > reach * 2 + 1, height > reach * 2 + 1,
+              let pixels = statusPixels(in: image, rect: rect, width: width, height: height,
+                                        interpolation: .none) else { return 0 }
+        let stride = width * 4
+        func edge(at index: Int, step: Int) -> Int {
+            var strongest = 0
+            for channel in 0..<3 {
+                let p = index + channel
+                let gradient = Int(pixels[p + step]) - Int(pixels[p])
+                let contrast = Int(pixels[p + (reach + 1) * step]) - Int(pixels[p - reach * step])
+                // A real local step changes in the same direction at both scales.
+                if abs(gradient) >= 10, abs(contrast) >= 30, gradient * contrast > 0 {
+                    strongest = max(strongest, abs(gradient))
+                }
+            }
+            return strongest
+        }
+        var horizontal = [Int](repeating: 0, count: 256), vertical = horizontal
+        var horizontalCount = 0, verticalCount = 0
+        var left = width, right = 0, top = height, bottom = 0
+        for y in reach..<(height - reach - 1) {
+            for x in reach..<(width - reach - 1) {
+                let index = y * stride + x * 4
+                let h = edge(at: index, step: 4), v = edge(at: index, step: stride)
+                if h > 0 { horizontal[h] += 1; horizontalCount += 1 }
+                if v > 0 { vertical[v] += 1; verticalCount += 1 }
+                if h > 0 || v > 0 {
+                    left = min(left, x); right = max(right, x)
+                    top = min(top, y); bottom = max(bottom, y)
+                }
+            }
+        }
+        let minimumEdges = max(12, image.width / 32)
+        guard horizontalCount >= minimumEdges, verticalCount >= minimumEdges,
+              right - left >= minimumSpan, bottom - top >= max(4, image.width / 100) else { return 0 }
+        func upperDetail(_ histogram: [Int], count: Int) -> Int {
+            let target = (count * 85 + 99) / 100
+            var seen = 0
+            for value in 1..<histogram.count {
+                seen += histogram[value]
+                if seen >= target { return value }
+            }
+            return 0
+        }
+        return sqrt(Double(upperDetail(horizontal, count: horizontalCount)
+            * upperDetail(vertical, count: verticalCount))) / 255
+    }
+
+    private static func statusPixels(in image: CGImage, rect: CGRect, width: Int, height: Int,
+                                     interpolation: CGInterpolationQuality) -> [UInt8]? {
+        guard let strip = image.cropping(to: rect) else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.interpolationQuality = interpolation
+            context.draw(strip, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return rendered ? pixels : nil
+    }
+
+    /// Compare the fixed rightmost indicator, independently of the wider lane's
+    /// edge score. A noisy or changing background cannot stand in for a battery.
+    static func preservesBatteryDetail(_ opening: CGImage, _ candidate: CGImage, statusBottom: CGFloat) -> Bool {
+        let width = CGFloat(opening.width)
+        guard opening.width == candidate.width, opening.height == candidate.height,
+              statusBottom.isFinite, statusBottom >= width * 0.08, statusBottom <= width * 0.18 else { return false }
+        let rect = CGRect(x: floor(width * 0.845), y: floor(statusBottom - width * 0.078),
+            width: ceil(width * 0.113), height: ceil(width * 0.062))
+        guard rect.maxY <= CGFloat(opening.height),
+              let before = batteryFeature(in: opening, rect: rect),
+              let after = batteryFeature(in: candidate, rect: rect),
+              abs(before.box.midX - after.box.midX) <= 3,
+              abs(before.box.midY - after.box.midY) <= 2 else { return false }
+        let overlap = before.pixels.reduce(0) { $0 + (after.pixels.contains($1) ? 1 : 0) }
+        let combined = before.pixels.count + after.pixels.count - overlap
+        return overlap * 100 >= min(before.pixels.count, after.pixels.count) * 68
+            && overlap * 100 >= combined * 48
+    }
+
+    private static func batteryFeature(in image: CGImage, rect: CGRect) -> (box: CGRect, pixels: Set<Int>)? {
+        // Analyze a low-frequency silhouette so a softened but authentic icon
+        // can match its sharper rendition. The original pixels are untouched.
+        let width = 46, height = 26
+        guard let pixels = statusPixels(in: image, rect: rect, width: width, height: height,
+                                        interpolation: .medium) else { return nil }
+        let indices = 0..<(width * height)
+        let border = indices.filter { i in i / width < 2 || i / width >= height - 2 || i % width == 0 || i % width == width - 1 }
+        let background = (0..<3).map { channel in border.map { Int(pixels[$0 * 4 + channel]) }.sorted()[border.count / 2] }
+        let contrast = indices.map { i in (0..<3).map { abs(Int(pixels[i * 4 + $0]) - background[$0]) }.max() ?? 0 }
+        guard border.filter({ contrast[$0] <= 24 }).count * 100 >= border.count * 85 else { return nil }
+        var remaining = contrast.map { $0 >= 28 }
+        var feature: (box: CGRect, pixels: Set<Int>)?
+        for start in indices where remaining[start] {
+            var queue = [start], cursor = 0
+            remaining[start] = false
+            var left = start % width, right = left, top = start / width, bottom = top
+            var rowCounts = [Int](repeating: 0, count: height)
+            while cursor < queue.count {
+                let i = queue[cursor]; cursor += 1
+                let x = i % width, y = i / width
+                left = min(left, x); right = max(right, x)
+                top = min(top, y); bottom = max(bottom, y)
+                rowCounts[y] += 1
+                for (xx, yy) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                    where xx >= 0 && xx < width && yy >= 0 && yy < height {
+                    let next = yy * width + xx
+                    if remaining[next] { remaining[next] = false; queue.append(next) }
+                }
+            }
+            let w = right - left + 1, h = bottom - top + 1
+            guard left >= 2, right < width - 2, top >= 2, bottom < height - 2,
+                  (16...34).contains(w), (7...18).contains(h), w * 10 >= h * 14, w <= h * 4,
+                  (24...62).contains(left + right), queue.count * 100 >= w * h * 34,
+                  max(rowCounts[top], rowCounts[top + 1], rowCounts[top + 2]) * 100 >= w * 55,
+                  max(rowCounts[bottom], rowCounts[bottom - 1], rowCounts[bottom - 2]) * 100 >= w * 55 else { continue }
+            guard feature == nil else { return nil }
+            feature = (CGRect(x: left, y: top, width: w, height: h), Set(queue))
+        }
+        return feature
+    }
+
+    static func bottom(in image: CGImage, maximumBottom: CGFloat, allowsClocklessRecording: Bool = false) -> CGFloat? {
+        let nativeWidth = CGFloat(image.width)
+        guard let evidence = capsule(in: image, maximumBottom: maximumBottom,
+                                     allowsClocklessRecording: allowsClocklessRecording) else { return nil }
+        if evidence.isClocklessRecording { return ceil(evidence.bottom + evidence.padding) }
+        let band = evidence.band
+        // OCR only the left status-clock area, once per selected page prefix.
+        // Native bounds convert Vision's bottom-origin boxes to top pixels.
+        let clockWidth = Int(floor(nativeWidth * 0.27))
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = false
+        let pillTop = evidence.top, pillBottom = evidence.bottom
+        func clocks(in rect: CGRect) -> [CGRect] {
+            guard let clockImage = image.cropping(to: rect),
+                  (try? VNImageRequestHandler(cgImage: clockImage).perform([request])) != nil else { return [] }
+            return (request.results ?? []).compactMap { observation -> CGRect? in
+                guard let text = observation.topCandidates(1).first, text.confidence >= 0.4 else { return nil }
+                let value = text.string.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "：", with: ":")
+                guard value.range(of: #"^\d{1,2}:\d{2}$"#, options: .regularExpression) != nil else { return nil }
+                let parts = value.split(separator: ":").compactMap { Int($0) }
+                guard parts.count == 2, parts[0] < 24, parts[1] < 60 else { return nil }
+                let box = observation.boundingBox
+                let x = rect.minX + box.minX * rect.width, w = box.width * rect.width
+                let y = rect.minY + (1 - box.maxY) * rect.height, h = box.height * rect.height
+                guard x >= nativeWidth * 0.025, x + w < nativeWidth * 0.27,
+                      w >= nativeWidth * 0.04, w <= nativeWidth * 0.20,
+                      h >= nativeWidth * 0.015, h <= nativeWidth * 0.065,
+                      y + h / 2 >= pillTop, y + h / 2 <= pillBottom else { return nil }
+                return CGRect(x: x, y: y, width: w, height: h)
+            }
+        }
+        var found = clocks(in: CGRect(x: 0, y: 0, width: clockWidth, height: band))
+        if found.isEmpty {
+            // Photo texture can join otherwise valid clock glyphs in Vision.
+            // Retry only the already allowed clock area at the proved island's
+            // vertical extent. Full time syntax and native bounds stay strict.
+            let left = floor(nativeWidth * 0.025), top = floor(pillTop)
+            found = clocks(in: CGRect(x: left, y: top,
+                width: CGFloat(clockWidth) - left, height: ceil(pillBottom) - top))
+        }
+        guard found.count == 1, let clock = found.first else { return nil }
+        let bottom = ceil(max(pillBottom, clock.maxY) + evidence.padding)
+        // Never clamp through a capsule that overlaps the matched content.
+        guard bottom <= maximumBottom else { return nil }
+        return bottom
+    }
+}
+
 /// Conservative, local inspection of our black/red expanded activity and the
 /// neutral system sharing sheet. No arbitrary startup sleep or fixed cropping.
 enum CaptureOverlayDetector {
+    static func expandedIslandSearchDepth(width: CGFloat) -> CGFloat { ceil(width * 0.32) }
+
+    /// Locates a possible expanded system overlay in native top-origin pixels.
+    /// A caller must prove it with another matched frame or existing overlay evidence.
+    static func expandedIslandCandidate(in image: CGImage) -> CGRect? {
+        let nativeWidth = image.width, nativeHeight = image.height
+        guard nativeWidth >= 200, nativeHeight > nativeWidth * 3 / 2 else { return nil }
+        let band = min(nativeHeight, Int(expandedIslandSearchDepth(width: CGFloat(nativeWidth))))
+        guard let strip = image.cropping(to: CGRect(x: 0, y: 0, width: nativeWidth, height: band)) else { return nil }
+        let width = 256, height = Int(ceil(Double(band) * Double(width) / Double(nativeWidth)))
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.interpolationQuality = .low
+            context.draw(strip, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { return nil }
+
+        let light = (0..<(width * height)).map { i in
+            Int(max(pixels[i * 4], pixels[i * 4 + 1], pixels[i * 4 + 2]))
+        }
+        let dark = light.map { $0 < 48 }
+        struct Blob {
+            var left: Int; var right: Int; var top: Int; var bottom: Int
+            var w: Int { right - left + 1 }
+            var h: Int { bottom - top + 1 }
+        }
+        func row(_ y: Int, in box: Blob) -> ClosedRange<Int>? {
+            let base = y * width
+            guard let first = (box.left...box.right).first(where: { dark[base + $0] }),
+                  let last = (first...box.right).last(where: { dark[base + $0] }) else { return nil }
+            return first...last
+        }
+        func contrast(_ outside: (Int, Int), _ inside: (Int, Int)) -> Int {
+            light[outside.1 * width + outside.0] - light[inside.1 * width + inside.0]
+        }
+        func hasRoundedContrast(_ box: Blob) -> Bool {
+            let middle = box.top + box.h / 2
+            guard let top = row(box.top + 1, in: box), let bottom = row(box.bottom - 1, in: box),
+                  let center = row(middle, in: box), center.count * 100 >= box.w * 95,
+                  [top, bottom].allSatisfy({ $0.count * 100 >= box.w * 48 && $0.count * 100 <= box.w * 94 }) else { return false }
+            let anchors = [30, 40, 50, 60, 70]
+            let columns = anchors.map { box.left + box.w * $0 / 100 }
+            let rows = anchors.map { box.top + box.h * $0 / 100 }
+            let upper = columns.map { contrast(($0, box.top - 2), ($0, box.top + 2)) }
+            let lower = columns.map { contrast(($0, box.bottom + 2), ($0, box.bottom - 2)) }
+            let sides = rows.compactMap { y -> (Int, Int)? in
+                guard let span = row(y, in: box), span.count * 100 >= box.w * 88 else { return nil }
+                return (contrast((span.lowerBound - 2, y), (span.lowerBound + 2, y)),
+                        contrast((span.upperBound + 2, y), (span.upperBound - 2, y)))
+            }
+            return sides.count == anchors.count
+                && [upper, lower, sides.map { $0.0 }, sides.map { $0.1 }].allSatisfy { edge in
+                    edge.filter { $0 >= 24 }.count >= 4
+                }
+        }
+
+        let scaleX = CGFloat(nativeWidth) / CGFloat(width), scaleY = CGFloat(band) / CGFloat(height)
+        let compactBottom = floor(CGFloat(nativeHeight) * 0.075)
+        var remaining = dark
+        var candidate: CGRect?
+        for start in remaining.indices where remaining[start] {
+            var queue = [start], cursor = 0
+            remaining[start] = false
+            var box = Blob(left: start % width, right: start % width, top: start / width, bottom: start / width)
+            while cursor < queue.count {
+                let i = queue[cursor]; cursor += 1
+                let x = i % width, y = i / width
+                box.left = min(box.left, x); box.right = max(box.right, x)
+                box.top = min(box.top, y); box.bottom = max(box.bottom, y)
+                for (xx, yy) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                    where xx >= 0 && xx < width && yy >= 0 && yy < height {
+                    let next = yy * width + xx
+                    if remaining[next] { remaining[next] = false; queue.append(next) }
+                }
+            }
+            guard box.left >= 2, box.right + 2 < width,
+                  box.top >= 3, box.top <= width * 7 / 100, box.bottom + 2 < height,
+                  box.w >= width / 2, box.w <= width * 84 / 100,
+                  box.h >= width * 13 / 100, box.h <= width * 28 / 100,
+                  box.w * 10 >= box.h * 23, box.w <= box.h * 5,
+                  abs(box.left + box.right - width) <= width * 18 / 100,
+                  queue.count * 100 >= box.w * box.h * 78,
+                  CGFloat(box.bottom + 1) * scaleY > compactBottom,
+                  hasRoundedContrast(box) else { continue }
+            guard candidate == nil else { return nil }
+            // Expand the analysis contour by two samples to cover antialiasing.
+            let x0 = floor(CGFloat(box.left - 2) * scaleX), y0 = floor(CGFloat(box.top - 2) * scaleY)
+            let x1 = min(CGFloat(nativeWidth), ceil(CGFloat(box.right + 3) * scaleX))
+            let y1 = min(CGFloat(band), ceil(CGFloat(box.bottom + 3) * scaleY))
+            candidate = CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+        }
+        return candidate
+    }
+
     struct Detection {
         let coveredTopRatio: CGFloat
         let isSystemPanel: Bool
@@ -2175,5 +2897,168 @@ enum CaptureOverlayDetector {
             }
         }
         return Detection(coveredTopRatio: coveredTopRatio, isSystemPanel: isSystemPanel)
+    }
+}
+
+private enum SameOpeningViewport {
+    static func isSameViewport(_ covered: CGImage, _ candidate: CGImage,
+                               occlusion: CGRect, contentTop: CGFloat, contentBottom: CGFloat) -> Bool {
+        let width = covered.width
+        let height = covered.height
+        guard hasComparableGeometry(covered, candidate),
+              [occlusion.minX, occlusion.minY, occlusion.maxX, occlusion.maxY,
+               contentTop, contentBottom].allSatisfy(\.isFinite),
+              !occlusion.isEmpty, occlusion.minX >= 0, occlusion.maxX <= CGFloat(width),
+              occlusion.minY >= 0, occlusion.maxY <= CGFloat(height),
+              contentTop >= 0, contentBottom <= CGFloat(height), contentTop < contentBottom else { return false }
+
+        // A changed JPEG MCU can affect the pixels just beyond the visible overlay.
+        let halo = 16
+        let firstRow = Int(ceil(contentTop))
+        let lastRow = Int(floor(contentBottom))
+        let bodyStart = max(firstRow, Int(ceil(occlusion.maxY)) + halo)
+        let leftEnd = Int(floor(occlusion.minX)) - halo
+        let rightStart = Int(ceil(occlusion.maxX)) + halo
+        guard lastRow - bodyStart >= 128, leftEnd >= halo, width - rightStart >= halo else { return false }
+        return compare(covered, candidate, firstRow: firstRow, lastRow: lastRow, bodyStart: bodyStart,
+                       navigationColumns: [0..<leftEnd, rightStart..<width])
+    }
+
+    static func isSameViewport(_ covered: CGImage, _ candidate: CGImage,
+                               statusBottom: CGFloat, contentTop: CGFloat, contentBottom: CGFloat) -> Bool {
+        let width = covered.width
+        guard hasComparableGeometry(covered, candidate),
+              [statusBottom, contentTop, contentBottom].allSatisfy(\.isFinite),
+              statusBottom > 0, statusBottom <= contentTop, contentTop < contentBottom,
+              contentBottom <= CGFloat(covered.height) else { return false }
+
+        // Both compact status bars end above the navigation. Compare the full
+        // width across that band, including titles between the side controls.
+        let firstRow = Int(ceil(statusBottom))
+        let navigationTop = Int(ceil(contentTop))
+        let lastRow = Int(floor(contentBottom))
+        let navigationDepth = max(32, Int(ceil(CGFloat(width) * 0.12)))
+        let bodyStart = min(lastRow - 128, navigationTop + navigationDepth)
+        guard bodyStart - navigationTop >= 32 else { return false }
+        return compare(covered, candidate, firstRow: firstRow, lastRow: lastRow, bodyStart: bodyStart,
+                       navigationColumns: [0..<width])
+    }
+
+    private static func hasComparableGeometry(_ covered: CGImage, _ candidate: CGImage) -> Bool {
+        let width = covered.width
+        let height = covered.height
+        return width == candidate.width && height == candidate.height
+            && width >= 200 && width <= 4096 && height > 0 && width <= 16_000_000 / height
+    }
+
+    private static func compare(_ covered: CGImage, _ candidate: CGImage,
+                                firstRow: Int, lastRow: Int, bodyStart: Int,
+                                navigationColumns: [Range<Int>]) -> Bool {
+        let width = covered.width
+        let rowBytes = width * 4
+        let rows = lastRow - firstRow
+        let rect = CGRect(x: 0, y: firstRow, width: width, height: rows)
+        let space = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        func raster(_ image: CGImage) -> [UInt8]? {
+            guard let crop = image.cropping(to: rect) else { return nil }
+            var pixels = [UInt8](repeating: 0, count: rowBytes * rows)
+            let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(data: buffer.baseAddress, width: width, height: rows,
+                    bitsPerComponent: 8, bytesPerRow: rowBytes, space: space, bitmapInfo: bitmapInfo) else { return false }
+                context.interpolationQuality = .none
+                context.setBlendMode(.copy)
+                context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: rows))
+                return true
+            }
+            return rendered ? pixels : nil
+        }
+        guard let before = raster(covered), let after = raster(candidate) else { return false }
+        func difference(_ a: [UInt8], _ i: Int, _ b: [UInt8], _ j: Int) -> Int {
+            max(abs(Int(a[i]) - Int(b[j])), abs(Int(a[i + 1]) - Int(b[j + 1])),
+                abs(Int(a[i + 2]) - Int(b[j + 2])))
+        }
+
+        // Check every exposed navigation pixel so a thin icon is not skipped by sampling.
+        let firstBodyRow = bodyStart - firstRow
+        for columns in navigationColumns {
+            for top in stride(from: 0, to: firstBodyRow, by: 16) {
+                for left in stride(from: columns.lowerBound, to: columns.upperBound, by: 16) {
+                    let bottom = min(top + 16, firstBodyRow)
+                    let right = min(left + 16, columns.upperBound)
+                    let count = (bottom - top) * (right - left)
+                    var total = 0
+                    var changed = 0
+                    for y in top..<bottom {
+                        for x in left..<right {
+                            let i = y * rowBytes + x * 4
+                            let delta = difference(before, i, after, i)
+                            if delta >= 36 { return false }
+                            total += delta
+                            if delta >= 16 { changed += 1 }
+                        }
+                    }
+                    if total > count * 4 || changed * 24 > count { return false }
+                }
+            }
+        }
+
+        // Sample original pixels and nearby pixels inside each body tile. Independent
+        // local edges spread across rows and columns are required to prove alignment.
+        let columns = 6
+        let bands = 8
+        let samplesPerSide = 10
+        var texturedTiles = 0
+        var texturedBands = Set<Int>()
+        var texturedColumns = Set<Int>()
+        var textureSamples = 0
+        var allSamples = 0
+        var allChanged = 0
+        for band in 0..<bands {
+            let top = firstBodyRow + (rows - firstBodyRow) * band / bands
+            let bottom = firstBodyRow + (rows - firstBodyRow) * (band + 1) / bands
+            for column in 0..<columns {
+                let left = width * column / columns
+                let right = width * (column + 1) / columns
+                var total = 0
+                var changed = 0
+                var texture = 0
+                var changedTexture = 0
+                for sy in 0..<samplesPerSide {
+                    let y = min(bottom - 4, top + (2 * sy + 1) * (bottom - top) / (2 * samplesPerSide))
+                    for sx in 0..<samplesPerSide {
+                        let x = min(right - 4, left + (2 * sx + 1) * (right - left) / (2 * samplesPerSide))
+                        let i = y * rowBytes + x * 4
+                        let rightPixel = i + 12
+                        let lowerPixel = i + rowBytes * 3
+                        let delta = max(difference(before, i, after, i),
+                                        difference(before, rightPixel, after, rightPixel),
+                                        difference(before, lowerPixel, after, lowerPixel))
+                        total += delta
+                        if delta >= 20 { changed += 1 }
+                        let beforeEdge = max(difference(before, i, before, rightPixel),
+                                             difference(before, i, before, lowerPixel))
+                        let afterEdge = max(difference(after, i, after, rightPixel),
+                                            difference(after, i, after, lowerPixel))
+                        if beforeEdge >= 18 && afterEdge >= 18 {
+                            texture += 1
+                            if delta >= 20 { changedTexture += 1 }
+                        }
+                    }
+                }
+                let count = samplesPerSide * samplesPerSide
+                if total > count * 6 || changed * 10 > count || changedTexture * 8 > texture { return false }
+                allSamples += count
+                allChanged += changed
+                textureSamples += texture
+                if texture >= 3 {
+                    texturedTiles += 1
+                    texturedBands.insert(band)
+                    texturedColumns.insert(column)
+                }
+            }
+        }
+        return allChanged * 30 <= allSamples && textureSamples >= 24 && texturedTiles >= 4
+            && texturedBands.count >= 3 && texturedColumns.count >= 2
     }
 }

@@ -82,7 +82,7 @@ try {
   }
   for (const [name, level] of [
     ['regression-metrics', 'report-behavior'], ['home-icon-only', 'source-contract'],
-    ['capture-settings', 'source-contract'], ['capture-entry', 'source-contract'],
+    ['capture-settings', 'source-contract'], ['home-presentation', 'native-presentation+source-bindings'], ['capture-entry', 'source-contract'],
     ['picker-lifecycle', 'native-with-picker-stubs'], ['capture-overlay', 'native-Vision+OCR-fallback'], ['app-language', 'native+source'],
     ['notification-authorization', 'native-with-system-stubs'], ['storage-cleanup', 'native+source'],
   ]) step(name, level, process.execPath, [`Tests/check-${name}.mjs`]);
@@ -104,8 +104,16 @@ try {
     ['Tests/check-horizontal-floating-controls.mjs', simulator]);
   step('capture-pipeline-diagnostics', 'native-with-SCK-metadata-stubs', process.execPath,
     ['Tests/check-capture-pipeline-diagnostics.mjs', simulator]);
+  step('native-capture-regressions', 'native-capture+SCK-metadata-key-shim', process.execPath,
+    ['Tests/check-native-capture-regressions.mjs', simulator]);
+  step('status-quality-diagnostics', 'native-synthetic-pixel+owned-storage', process.execPath,
+    ['Tests/check-status-capture-quality-diagnostics.mjs']);
+  step('native-capture-quality-diagnostics', 'diagnostic-enabled-native-pipeline', process.execPath,
+    ['Tests/check-native-capture-regressions.mjs', simulator, '--quality-diagnostics']);
   step('duo-preview', 'native-UIKit+injected-system-insets', process.execPath,
     ['Tests/check-duo-preview.mjs', simulator]);
+  step('statusbar-crop', 'native-Vision+UIKit+synthetic-pixel-oracle', process.execPath,
+    ['Tests/check-statusbar-crop.mjs', '--simulator', simulator]);
   const captureLog = step('capture', 'optimized-simulator-behavior', process.execPath,
     ['Tests/check-capture-improvements.mjs', simulator], {
       LONGSHOT_STITCH_BASELINE: join(output, 'baseline-FrameStitcher.swift'),
@@ -137,7 +145,7 @@ try {
   const widgetInfo = info(join(deviceApp, 'PlugIns/LongScrollWidgets.appex/Info.plist'));
   for (const key of ['CFBundleVersion', 'CFBundleShortVersionString', 'MinimumOSVersion']) assert.equal(appInfo[key], widgetInfo[key]);
   const executable = readFileSync(join(deviceApp, appInfo.CFBundleExecutable));
-  for (const hook of ['--snapshot-', '--benchmark-latest', '--export-frames']) {
+  for (const hook of ['--snapshot-', '--benchmark-latest', '--export-frames', 'StatusCaptureQualityDiagnostics', 'LongShotStatusQuality']) {
     assert.ok(!executable.includes(Buffer.from(hook)), `Developer hook must not enter standard Release: ${hook}`);
   }
   report.build = { version: appInfo.CFBundleShortVersionString, build: appInfo.CFBundleVersion,

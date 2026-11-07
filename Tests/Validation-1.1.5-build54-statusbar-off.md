@@ -1,0 +1,11 @@
+# 1.1.5 (54) portrait status-bar crop
+
+The user accepted Keep status bar ON on a connected iPhone running Build 52. A second real capture with the setting OFF showed the island and the detached recording circle without a clock or battery. Both original attachments matched their recorded app exports. The selected prefix frames were outside the retained diagnostic window, so the evidence covers the exported results and detector repro, with no same-frame capture attribution.
+
+The red ring splits the detached circle's dark contour into an outer shape and an enclosed center. The detector now treats a small centered component enclosed by that outer shape as part of the circle. Portrait OFF can also prove the cut from the marked island and detached recording circle when both status lanes are blank. A native-pixel check guards the crop area around the two shapes, including a one-pixel app divider. Portrait ON retains its captured prefix. Horizontal analysis still requires clock evidence.
+
+The original 1206-pixel-wide failure image and an in-memory JPEG at the capture quality both prove a crop at row 154. The island and circle end before row 152 and the navigation row starts around row 225. Native Vision/CoreGraphics checks passed 67 assertions with the private fixture. UIKit checks passed 189 assertions, including exact clockless OFF height, intact navigation, raw ON top and immutable source images. The test assets are synthetic. The private originals and diagnostic samples stay local.
+
+The final coherent run passed **33/33** gates, including performance, pinned baseline output, portrait and horizontal crop coverage, and standard device and simulator builds. Report: `Build/regression-OYuOKa/report.json`. Source/config/test SHA-256: `1ec00cfaab5ca131ab004f56e770b8c0c218263f07e8f57751af4155ca95688e`.
+
+The standard Release archive uses the same 1.1.5 (54) version for the app and widget. Its Device Test and App Store exports passed strict signature, provisioning, bilingual resources and image diagnostics absence checks. The Device Test build was installed over Build 52, with a separate installed-app read-back confirming 54. A subsequent user capture exposed a distinct expanded overlay over a dark profile photo. See the [Build 55 record](Validation-1.1.5-build55-expanded-opening.md). Physical iPhone Duo validation remains unverified.

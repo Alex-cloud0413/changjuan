@@ -154,8 +154,8 @@ final class ScreenCaptureCoordinator: NSObject {
 
         do {
             let sessionURL = try captureQueue.sync {
-                // The sharing API exposes captured pixels, not another app's
-                // safe area. Unknown chrome must not cost real content.
+                // Zero selects captured-pixel status-bar detection at render
+                // time. Never substitute this app's safe area for the target's.
                 try pipeline.beginSession(topCropRatio: 0)
             }
 
@@ -576,7 +576,7 @@ final class ScreenCaptureHostVisibility: @unchecked Sendable {
     var hasVisiblePartialWindow: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return partialWindow
+        return foreground && partialWindow
     }
 
     func setPartialWindow(_ value: Bool) {
@@ -599,6 +599,45 @@ final class ScreenCaptureHostVisibility: @unchecked Sendable {
 
     func setSceneActivationState(_ state: UIScene.ActivationState) {
         setForeground(state == .foregroundActive || state == .foregroundInactive)
+    }
+
+    /// A background LiveActivityIntent can cold launch an inactive process
+    /// before it has any foreground scene. Application inactivity alone must
+    /// not leave the default host exclusion enabled for the entire recording.
+    func refresh(applicationState: UIApplication.State, sceneStates: [UIScene.ActivationState]) {
+        let visible: Bool
+        switch applicationState {
+        case .active: visible = true
+        case .background: visible = false
+        case .inactive:
+            visible = sceneStates.contains { $0 == .foregroundActive || $0 == .foregroundInactive }
+        @unknown default: visible = true
+        }
+        lock.lock()
+        foreground = visible
+        if !visible { partialWindow = false }
+        lock.unlock()
+    }
+
+    func updateScene(activationState: UIScene.ActivationState, frameInDisplay: CGRect?, displayBounds: CGRect) {
+        lock.lock()
+        defer { lock.unlock() }
+        foreground = activationState == .foregroundActive || activationState == .foregroundInactive
+        partialWindow = frameInDisplay.map { Self.isPartialScene($0, in: displayBounds) } ?? false
+    }
+
+    /// UIWindow frames move during keyboard and rotation transitions. Only a
+    /// known, contained scene rectangle establishes a partial display window.
+    /// Unknown/transitional geometry still excludes host pixels, without
+    /// claiming that an ordinary full-screen recording is unsupported.
+    static func isPartialScene(_ frame: CGRect, in display: CGRect) -> Bool {
+        let values = [frame.minX, frame.minY, frame.width, frame.height,
+                      display.minX, display.minY, display.width, display.height]
+        guard values.allSatisfy(\.isFinite), frame.width > 0, frame.height > 0,
+              display.width > 0, display.height > 0,
+              display.insetBy(dx: -1, dy: -1).contains(frame) else { return false }
+        return abs(frame.minX - display.minX) > 1 || abs(frame.minY - display.minY) > 1
+            || abs(frame.width - display.width) > 1 || abs(frame.height - display.height) > 1
     }
 }
 
@@ -735,6 +774,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
     private var frameIndex = 0
     private var lastSavedPresentationTime: CMTime?
     private var hasRequestedFinish = false
+    private var pendingPageBoundary = false
     private var diagnostics = ScreenFramePipelineDiagnostics()
     private(set) var isPausedForNextPage = false
 
@@ -764,9 +804,13 @@ final class ScreenFramePipeline: @unchecked Sendable {
         frameIndex = 0
         lastSavedPresentationTime = nil
         hasRequestedFinish = false
+        pendingPageBoundary = false
         isPausedForNextPage = false
         diagnostics = ScreenFramePipelineDiagnostics()
         CaptureCommandStore.clearFinishRequest()
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+        StatusCaptureQualityDiagnostics.begin(sessionURL: session.0)
+#endif
         return session.0
     }
 
@@ -819,12 +863,14 @@ final class ScreenFramePipeline: @unchecked Sendable {
                 let geometry = CaptureGeometrySegment(startFrame: frameIndex,
                     pixelWidth: image.cgImage?.width ?? 0, pixelHeight: image.cgImage?.height ?? 0,
                     videoOrientation: videoOrientation(from: sampleBuffer))
+                if pendingPageBoundary {
+                    appendSegmentStart(frameIndex)
+                    pendingPageBoundary = false
+                }
                 if let previous = manifest?.geometrySegments?.last,
                    previous.pixelWidth != geometry.pixelWidth || previous.pixelHeight != geometry.pixelHeight
                     || previous.videoOrientation != geometry.videoOrientation {
-                    var starts = manifest?.segmentStarts ?? [0]
-                    if starts.last != frameIndex { starts.append(frameIndex) }
-                    manifest?.segmentStarts = starts
+                    appendSegmentStart(frameIndex)
                     manifest?.geometrySegments?.append(geometry)
                 } else if manifest?.geometrySegments?.isEmpty == true {
                     manifest?.geometrySegments?.append(geometry)
@@ -837,6 +883,13 @@ final class ScreenFramePipeline: @unchecked Sendable {
                 lastSavedPresentationTime = presentationTime
                 diagnostics.accept(index: frameIndex - 1, presentationTime: presentationTime,
                     width: image.cgImage?.width ?? 0, height: image.cgImage?.height ?? 0, bytes: data.count)
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+                if let captured = image.cgImage {
+                    StatusCaptureQualityDiagnostics.captured(image: captured, encodedFrame: data,
+                        index: frameIndex - 1, sessionURL: sessionURL,
+                        metadata: qualityMetadata(from: sampleBuffer))
+                }
+#endif
                 // The full-quality JPEG is already committed. A slow or full
                 // preparation queue never drops capture frames or delays finish.
                 preprocessor.enqueue(data, for: url, options: manifest?.captureOptions ?? CaptureOptions())
@@ -864,13 +917,16 @@ final class ScreenFramePipeline: @unchecked Sendable {
         guard sessionURL != nil, !hasRequestedFinish else { return false }
         isPausedForNextPage.toggle()
         if !isPausedForNextPage {
-            var starts = manifest?.segmentStarts ?? [0]
-            if frameIndex > (starts.last ?? 0) { starts.append(frameIndex) }
-            manifest?.segmentStarts = starts
+            pendingPageBoundary = frameIndex > 0
             lastSavedPresentationTime = nil
         }
-        if let manifest, let sessionURL { try? CaptureStorage.write(manifest, to: sessionURL) }
         return isPausedForNextPage
+    }
+
+    private func appendSegmentStart(_ index: Int) {
+        var starts = manifest?.segmentStarts ?? [0]
+        if index > (starts.last ?? 0) { starts.append(index) }
+        manifest?.segmentStarts = starts
     }
 
     func finishSession(autoStopped: Bool, trimTrailingFrames _: Bool) -> Completion? {
@@ -918,6 +974,7 @@ final class ScreenFramePipeline: @unchecked Sendable {
         frameIndex = 0
         lastSavedPresentationTime = nil
         hasRequestedFinish = false
+        pendingPageBoundary = false
         isPausedForNextPage = false
     }
 
@@ -943,6 +1000,26 @@ final class ScreenFramePipeline: @unchecked Sendable {
 #endif
     }
 
+#if LONGSHOT_STATUS_QUALITY_DIAGNOSTICS
+    private func qualityMetadata(from sampleBuffer: CMSampleBuffer) -> [String: Any] {
+        var values: [String: Any] = ["videoOrientation": videoOrientation(from: sampleBuffer)]
+        if let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            values["pixelBufferWidth"] = CVPixelBufferGetWidth(buffer)
+            values["pixelBufferHeight"] = CVPixelBufferGetHeight(buffer)
+            values["pixelFormat"] = CVPixelBufferGetPixelFormatType(buffer)
+        }
+#if !LONGSHOT_CAPTURE_CHECKS
+        if let entries = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+            as? [[SCStreamFrameInfo: Any]], let entry = entries.first {
+            values["contentScale"] = entry[.contentScale] as? NSNumber
+            values["scaleFactor"] = entry[.scaleFactor] as? NSNumber
+            if let rect = entry[.contentRect] { values["contentRectDescription"] = String(describing: rect) }
+        }
+#endif
+        return values
+    }
+#endif
+
     private func makeImage(from sampleBuffer: CMSampleBuffer) -> UIImage? {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
             return nil
@@ -964,7 +1041,8 @@ final class ScreenFramePipeline: @unchecked Sendable {
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
             as? [[SCStreamFrameInfo: Any]],
            let orientation = attachments.first?[.videoOrientation] as? NSNumber {
-            return orientation.uint32Value
+            return CGImagePropertyOrientation(rawValue: orientation.uint32Value)?.rawValue
+                ?? CGImagePropertyOrientation.up.rawValue
         }
 #endif
         return CGImagePropertyOrientation.up.rawValue
@@ -1006,5 +1084,7 @@ final class ScreenCaptureHostVisibility: @unchecked Sendable {
     func setForeground(_: Bool) {}
     func setPartialWindow(_: Bool) {}
     func setSceneActivationState(_: UIScene.ActivationState) {}
+    func refresh(applicationState: UIApplication.State, sceneStates: [UIScene.ActivationState]) {}
+    func updateScene(activationState: UIScene.ActivationState, frameInDisplay: CGRect?, displayBounds: CGRect) {}
 }
 #endif
