@@ -11,13 +11,13 @@
   <img src="https://img.shields.io/badge/platform-iOS%2027%2B-000000?logo=apple&logoColor=white" alt="Platform: iOS 27+">
   <img src="https://img.shields.io/badge/Swift-5.0-F05138?logo=swift&logoColor=white" alt="Swift 5.0">
   <img src="https://img.shields.io/badge/Xcode-27.1-147EFB?logo=xcode&logoColor=white" alt="Xcode 27.1">
-  <img src="https://img.shields.io/badge/version-1.1.5%20(Build%2054)-lightgrey" alt="Version 1.1.5 (Build 54)">
+  <img src="https://img.shields.io/badge/version-1.1.5%20(Build%2055)-lightgrey" alt="Version 1.1.5 (Build 55)">
 </p>
 
 <p align="center"><b>简体中文</b> · App 内支持中文 / English 界面切换</p>
 
 > [!NOTE]
-> **当前发行候选为 1.1.5（Build 54）。** 「保留状态栏」开启时保留采集画面中的顶部状态栏，关闭时裁去能确认边界的状态栏。纵向保留效果已通过连接 iPhone 的用户实测。发行包使用标准构建。见 [Build 52 真机记录](Tests/Validation-1.1.5-build52-status-quality-diagnostic.md)。
+> **当前测试版本为 1.1.5（Build 55）。** 纵向关闭「保留状态栏」时，如果展开的灵动岛遮住了开头，长卷会从核对为同一滚动位置的无遮挡画面恢复顶部。找不到匹配画面时会提示重录并保留原始帧。[验证记录](Tests/Validation-1.1.5-build55-expanded-opening.md)
 
 ---
 

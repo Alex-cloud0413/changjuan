@@ -188,6 +188,7 @@ enum AppLanguage: String, CaseIterable, Sendable {
         "没有识别到连续滚动内容。请沿设置中的拼接方向缓慢滚动，保持相邻画面有重叠。": "No continuous scrolling content was found. Scroll slowly in the direction selected in Settings, with overlap between frames.",
         "长图生成失败，请重试。": "The image couldn't be created. Please try again.",
         "有一段内容缺少重叠画面，无法完整拼接。请放慢滚动速度后重试；原始画面已保留。": "Some content is missing overlapping frames, so it can't be stitched completely. Scroll more slowly and try again. Original frames are still on this device.",
+        "展开的灵动岛遮住了顶部内容。请等灵动岛收起后再开始滚动，原始画面已保留。": "The expanded Dynamic Island covered the top of the page. Wait for it to collapse before scrolling. Original frames are still on this device.",
         "这台设备当前不允许屏幕捕获，请检查系统的屏幕录制限制。": "Screen capture is not allowed on this device. Check the system's screen recording restrictions.",
         "你取消了屏幕捕获。": "You cancelled screen capture.",
         "你取消了屏幕捕获授权。": "You cancelled screen capture permission.",

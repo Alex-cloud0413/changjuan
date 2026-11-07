@@ -38,7 +38,7 @@ struct StatusBarCropCheck {
     }
 
     private enum Shape { case capsule, recordingCapsule, splitRecording, spurredRecordingBubble, rectangle, circle, absent }
-    private enum HeaderBackground { case plain, textured, photographic, unboundedShadow }
+    private enum HeaderBackground { case plain, textured, photographic, dimPhotographic, unboundedShadow }
     private enum FullScreenPair { case recording, unmarked, unmarkedCircle, bareRedDot, uncertainCircleEdge, inContent, foregroundGlyph, thinDivider }
 
     /// All coordinates are native pixels measured from the top-left.
@@ -200,7 +200,10 @@ struct StatusBarCropCheck {
                 } else {
                     let dx = (xx - 627) / 434, dy = (yy - 100) / 210
                     let shadow = exp(-(dx * dx + dy * dy))
-                    value = max(35, 140 - 98 * shadow + 9 * sin(xx / 67 + yy / 41) + grain)
+                    let photograph = max(35, 140 - 98 * shadow + 9 * sin(xx / 67 + yy / 41) + grain)
+                    // Match the visible photo around the expanded activity.
+                    // Its shadows must leave a bounded near-black contour.
+                    value = background == .dimPhotographic ? max(50, photograph * 0.72) : photograph
                 }
                 let i = (y * width + x) * 4
                 bytes[i] = UInt8(min(255, max(0, Int(value + 7))))
@@ -473,6 +476,8 @@ struct StatusBarCropCheck {
         }
         try checkPatternedIntegration(in: root.appendingPathComponent("patterned"))
         try checkClocklessRecordingIntegration(in: root.appendingPathComponent("clockless-recording"))
+        try checkExpandedPhotoOpeningIntegration(in: root.appendingPathComponent("expanded-photo-opening"))
+        try checkLegacyMaskedOpening(in: root.appendingPathComponent("legacy-masked-opening"))
         try checkCapturedHeaderIntegration(in: root.appendingPathComponent("captured-header"))
         try checkHorizontalIntegration(in: root.appendingPathComponent("horizontal"))
         for (url, data) in originals {
@@ -556,6 +561,122 @@ struct StatusBarCropCheck {
         }
         for (url, bytes) in originals {
             require(try Data(contentsOf: url) == bytes, "Clockless recording source JPEG bytes remain unchanged")
+        }
+    }
+
+    private enum PhotoOpening: String { case sameViewport, changedNavigation, movedViewport, legacyMasked }
+
+    private static func checkExpandedPhotoOpeningIntegration(in root: URL) throws {
+        let leftNav = CGRect(x: 30, y: 223, width: 79, height: 52)
+        let rightNav = CGRect(x: 1014, y: 223, width: 80, height: 52)
+        let centralTail = CGRect(x: 372, y: 196, width: 452, height: 94)
+        for scenario in [PhotoOpening.sameViewport, .changedNavigation, .movedViewport] {
+            let directory = root.appendingPathComponent(scenario.rawValue)
+            let offsets = scenario == .movedViewport ? [0, 137, 274, 411] : [0, 0, 137, 274]
+            let frames = try makeScrollFrames(in: directory.appendingPathComponent("frames"), status: true,
+                count: offsets.count, background: .dimPhotographic, indicator: .splitRecording,
+                jpegQuality: 0.9, scrollOffsets: offsets, photoOpening: scenario)
+            let originals = try frames.map { ($0, try Data(contentsOf: $0)) }
+            let opening = try readImage(frames[0]), peer = try readImage(frames[1])
+            let overlay = CaptureOverlayDetector.expandedIslandCandidate(in: opening)
+            require(overlay != nil && overlay!.maxY > 270
+                    && !overlay!.intersects(leftNav) && !overlay!.intersects(rightNav),
+                    "The synthetic activity has a bounded contour reaching below the exposed navigation controls")
+            let bodyBottom = opening.height - Int(ceil(CGFloat(opening.height) * 0.19))
+            let body = CGRect(x: 0, y: 320, width: opening.width, height: bodyBottom - 320)
+            require((nativePixelError(opening, rect: body, peer, rect: body) == 0) == (scenario != .movedViewport),
+                    "Only the duplicate photo viewport has identical native body pixels in \(scenario.rawValue)")
+            require((nativePixelError(opening, rect: leftNav, peer, rect: leftNav) > 5) == (scenario == .changedNavigation),
+                    "The changed-navigation peer has different visible left navigation")
+            require(nativePixelError(opening, rect: rightNav, peer, rect: rightNav) < 2,
+                    "The right navigation remains visibly outside the expanded activity")
+            require(nativePixelError(opening, rect: centralTail, peer, rect: centralTail) > 25,
+                    "The expanded activity hides actual photo pixels below the usual matching boundary")
+
+            func stitch(_ input: [URL], _ name: String, keep: Bool = false) throws -> StitchResult {
+                try FrameStitcher(options: CaptureOptions(keepsStatusBar: keep)).stitch(
+                    frameURLs: input, sessionURL: directory.appendingPathComponent(name), topCropRatio: 0)
+            }
+            if scenario == .sameViewport {
+                do {
+                    let detected = CaptureStatusBarDetector.bottom(in: peer, maximumBottom: 196)
+                    require(detected != nil && detected! < leftNav.minY,
+                            "The compact peer proves a status boundary above the photo navigation")
+                    let cut = Int(detected!)
+                    let baseline = try stitch(Array(frames.dropFirst()), "settled-off")
+                    let off = try stitch(frames, "off")
+                    let on = try stitch(frames, "on", keep: true)
+                    require(off.outputURLs.count == 1 && on.outputURLs.count == 1 && baseline.outputURLs.count == 1,
+                            "Both export modes recover one complete photo page")
+                    let cropped = try readImage(off.outputURLs[0]), kept = try readImage(on.outputURLs[0])
+                    let settled = try readImage(baseline.outputURLs[0])
+                    require(cropped.width == opening.width && kept.width == opening.width
+                            && kept.height == opening.height + 274 && kept.height - cropped.height == cut
+                            && cropped.height == settled.height,
+                            "OFF removes exactly the settled status band and retains all observed body rows")
+                    let expected = CGRect(x: 0, y: 0, width: cropped.width, height: bodyBottom - cut)
+                    require(nativePixelError(settled, rect: expected, cropped, rect: expected) < 1,
+                            "The recovered opening matches the status-free export from the settled peer")
+                    for (name, roi) in [("left navigation", leftNav), ("right navigation", rightNav),
+                                        ("central photo below the matching boundary", centralTail)] {
+                        require(nativePixelError(peer, rect: roi, cropped, rect: roi.offsetBy(dx: 0, dy: -CGFloat(cut))) < 5,
+                                "OFF preserves the settled native \(name)")
+                    }
+                    let expanded = CGRect(x: 182, y: 39, width: 796, height: 251)
+                    for (name, roi) in [("expanded island", expanded), ("left navigation", leftNav), ("right navigation", rightNav)] {
+                        require(nativePixelError(opening, rect: roi, kept, rect: roi) < 5,
+                                "ON retains the captured \(name) at its original position")
+                    }
+                } catch {
+                    FileHandle.standardError.write(Data("Expanded photo opening fixture failed at \(directory.path). \(error)\n".utf8))
+                    throw error
+                }
+            } else {
+                do {
+                    _ = try stitch(frames, "off")
+                    fatalError("OFF accepted an unverified expanded photo opening in \(scenario.rawValue)")
+                } catch StitchError.occludedOpening {
+                    require(true, "OFF reports the obscured opening without an equivalent peer")
+                } catch {
+                    FileHandle.standardError.write(Data("Unexpected failure for expanded photo opening \(scenario.rawValue). \(error)\n".utf8))
+                    throw error
+                }
+            }
+            for (url, bytes) in originals {
+                require(try Data(contentsOf: url) == bytes, "Expanded photo opening source JPEG bytes remain unchanged")
+            }
+        }
+    }
+
+    private static func checkLegacyMaskedOpening(in root: URL) throws {
+        let frames = try makeScrollFrames(in: root.appendingPathComponent("frames"), status: true,
+            count: 4, jpegQuality: 0.9, scrollOffsets: [0, 0, 137, 274], photoOpening: .legacyMasked)
+        let originals = try frames.map { ($0, try Data(contentsOf: $0)) }
+        let opening = try readImage(frames[0]), peer = try readImage(frames[1])
+        let legacy = CaptureOverlayDetector.inspect(opening)
+        let legacyBottom = ceil(CGFloat(opening.height) * legacy.coveredTopRatio)
+        let candidate = CaptureOverlayDetector.expandedIslandCandidate(in: opening)
+        let detected = CaptureStatusBarDetector.bottom(in: peer, maximumBottom: 196)
+        require(detected != nil && legacyBottom > detected! && legacyBottom < 196
+                && (candidate?.maxY ?? 0) > 196 && !legacy.isSystemPanel,
+                "Legacy mask ends inside the prefix, while the bounded activity covers the matching edge. Legacy \(legacyBottom), compact \(String(describing: detected)), expanded \(String(describing: candidate))")
+        let cut = Int(detected!)
+        let stitcher = FrameStitcher(options: CaptureOptions(keepsStatusBar: false))
+        let baseline = try stitcher.stitch(frameURLs: Array(frames.dropFirst()),
+            sessionURL: root.appendingPathComponent("baseline"), topCropRatio: 0)
+        let recovered = try stitcher.stitch(frameURLs: frames,
+            sessionURL: root.appendingPathComponent("recovered"), topCropRatio: 0)
+        require(baseline.outputURLs.count == 1 && recovered.outputURLs.count == 1,
+                "Both paths retain one complete native page")
+        let expected = try readImage(baseline.outputURLs[0]), actual = try readImage(recovered.outputURLs[0])
+        require(expected.height == opening.height + 274 - cut && actual.height == expected.height,
+                "Recovery before legacy prefix gating retains every row below the compact cut")
+        let witness = CGRect(x: 34, y: 174, width: 72, height: 18)
+        require(nativePixelError(peer, rect: witness, actual,
+                rect: witness.offsetBy(dx: 0, dy: -CGFloat(cut))) < 5,
+                "Recovery retains exposed app pixels between the compact cut and the matching edge")
+        for (url, bytes) in originals {
+            require(try Data(contentsOf: url) == bytes, "Legacy masked opening source JPEG bytes remain unchanged")
         }
     }
 
@@ -787,18 +908,57 @@ struct StatusBarCropCheck {
         }
     }
 
+    private static func drawPhotoOpening(in context: CGContext, scale: CGFloat, expanded: Bool,
+                                         changedNavigation: Bool, legacyMasked: Bool = false) {
+        func rounded(_ rect: CGRect, radius: CGFloat, color: CGColor) {
+            context.setFillColor(color)
+            context.addPath(CGPath(roundedRect: CGRect(x: rect.minX * scale, y: rect.minY * scale,
+                width: rect.width * scale, height: rect.height * scale), cornerWidth: radius * scale,
+                cornerHeight: radius * scale, transform: nil))
+            context.fillPath()
+        }
+        if legacyMasked {
+            rounded(CGRect(x: 42, y: 179, width: 56, height: 7), radius: 2,
+                    color: CGColor(red: 0.04, green: 0.39, blue: 0.74, alpha: 1))
+            if expanded {
+                let red = CGColor(red: 0.9, green: 0.1, blue: 0.12, alpha: 1)
+                rounded(CGRect(x: 247, y: 37, width: 670, height: 167), radius: 55,
+                        color: CGColor(gray: 0, alpha: 1))
+                rounded(CGRect(x: 480, y: 61, width: 180, height: 28), radius: 0, color: red)
+                rounded(CGRect(x: 280, y: 150, width: 605, height: 16), radius: 0, color: red)
+            }
+            return
+        }
+        let white = CGColor(gray: 1, alpha: 1)
+        for row in [234, 245, 256] {
+            rounded(CGRect(x: 44, y: row, width: changedNavigation ? 25 : 52, height: 5), radius: 2, color: white)
+        }
+        rounded(CGRect(x: 1024, y: 231, width: 44, height: 36), radius: 9, color: white)
+        rounded(CGRect(x: 1031, y: 238, width: 30, height: 22), radius: 4,
+                color: CGColor(red: 0.30, green: 0.23, blue: 0.19, alpha: 1))
+        guard expanded else { return }
+        rounded(CGRect(x: 182, y: 39, width: 796, height: 251), radius: 94,
+                color: CGColor(gray: 0, alpha: 1))
+        rounded(CGRect(x: 280, y: 133, width: 186, height: 58), radius: 24,
+                color: CGColor(gray: 0.065, alpha: 1))
+        rounded(CGRect(x: 812, y: 143, width: 62, height: 52), radius: 23,
+                color: CGColor(red: 0.29, green: 0.075, blue: 0.06, alpha: 1))
+    }
+
     private static func makeScrollFrames(in directory: URL, status: Bool, width: Int = 1206,
                                          height: Int = 2622, count: Int = 6, axis: CaptureAxis = .vertical,
                                          headerOffset: CGFloat = 0, headerMovement: Int = 0, earlyMovingRow: Bool = false,
                                          background: HeaderBackground = .plain, indicator: Shape = .capsule,
                                          jpegQuality: CGFloat = 0.94, scrollOffsets: [Int]? = nil,
-                                         transientOpening: Bool = false, fullScreenPair: FullScreenPair? = nil) throws -> [URL] {
+                                         transientOpening: Bool = false, fullScreenPair: FullScreenPair? = nil,
+                                         photoOpening: PhotoOpening? = nil) throws -> [URL] {
         precondition(scrollOffsets == nil || scrollOffsets?.count == count)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1; format.opaque = true; format.preferredRange = .standard
         let top = floor(CGFloat(height) * 0.075), bottom = CGFloat(height) - ceil(CGFloat(height) * 0.19)
         let scale = CGFloat(width) / 1206
+        let bodyStart = photoOpening == nil ? top : 320 * scale
         var random: UInt64 = 0x35a179c4
         let worldWidth = width + (axis == .horizontal ? count * 137 : 0)
         let worldHeight = height + (axis == .vertical ? count * 137 : 0)
@@ -821,32 +981,39 @@ struct StatusBarCropCheck {
             // instead of the source selected for the beginning of a reverse capture.
             let temporalOffset = headerOffset + CGFloat(index * (axis == .vertical ? 2 : headerMovement))
             let scrollOffset = scrollOffsets?[index] ?? index * 137
+            let expandedPhoto = photoOpening != nil && index == 0
             let header = try makeHeader(width: width, height: height,
-                clockTop: status && fullScreenPair == nil ? CGFloat(72 + temporalOffset) * scale : nil,
+                clockTop: status && fullScreenPair == nil && !expandedPhoto ? CGFloat(72 + temporalOffset) * scale : nil,
                 capsuleTop: CGFloat(42 + temporalOffset) * scale,
-                shape: status ? indicator : .absent, scale: scale, background: background,
+                shape: status && !expandedPhoto ? indicator : .absent, scale: scale, background: background,
                 fullScreenPair: fullScreenPair)
             let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { context in
                 UIImage(cgImage: header).draw(at: .zero)
                 context.cgContext.saveGState()
-                context.cgContext.clip(to: CGRect(x: 0, y: top, width: CGFloat(width), height: bottom - top))
+                context.cgContext.clip(to: CGRect(x: 0, y: bodyStart, width: CGFloat(width), height: bottom - bodyStart))
                 world.draw(at: CGPoint(x: axis == .horizontal ? -CGFloat(scrollOffset) : 0,
                                        y: top - (axis == .vertical ? CGFloat(scrollOffset) : 0)))
                 context.cgContext.restoreGState()
-                UIColor.white.setFill()
-                context.fill(CGRect(x: 0, y: top, width: CGFloat(width), height: 86 * scale))
-                "Weixin".draw(at: CGPoint(x: CGFloat(width) / 2 - 75 * scale, y: 209 * scale),
-                    withAttributes: [.font: UIFont.boldSystemFont(ofSize: 42 * scale), .foregroundColor: UIColor.black])
-                if earlyMovingRow {
-                    for x in stride(from: 0, to: worldWidth, by: 41) {
-                        let value = (x / 41 * 73 + 37) % 200
-                        UIColor(white: CGFloat(value) / 255, alpha: 1).setFill()
-                        context.fill(CGRect(x: x - index * 137, y: 166, width: 41, height: 8))
+                if let photoOpening {
+                    drawPhotoOpening(in: context.cgContext, scale: scale, expanded: expandedPhoto,
+                        changedNavigation: photoOpening == .changedNavigation && index == 1,
+                        legacyMasked: photoOpening == .legacyMasked)
+                } else {
+                    UIColor.white.setFill()
+                    context.fill(CGRect(x: 0, y: top, width: CGFloat(width), height: 86 * scale))
+                    "Weixin".draw(at: CGPoint(x: CGFloat(width) / 2 - 75 * scale, y: 209 * scale),
+                        withAttributes: [.font: UIFont.boldSystemFont(ofSize: 42 * scale), .foregroundColor: UIColor.black])
+                    if earlyMovingRow {
+                        for x in stride(from: 0, to: worldWidth, by: 41) {
+                            let value = (x / 41 * 73 + 37) % 200
+                            UIColor(white: CGFloat(value) / 255, alpha: 1).setFill()
+                            context.fill(CGRect(x: x - index * 137, y: 166, width: 41, height: 8))
+                        }
                     }
+                    // A distinct native navigation band must survive directly below the status crop.
+                    UIColor(red: 0.05, green: 0.55, blue: 0.93, alpha: 1).setFill()
+                    context.fill(CGRect(x: 0, y: 178 * scale, width: CGFloat(width), height: 12 * scale))
                 }
-                // A distinct native navigation band must survive directly below the status crop.
-                UIColor(red: 0.05, green: 0.55, blue: 0.93, alpha: 1).setFill()
-                context.fill(CGRect(x: 0, y: 178 * scale, width: CGFloat(width), height: 12 * scale))
                 if transientOpening && index == 0 {
                     let rect = CGRect(x: CGFloat(width) / 2 - 176 * scale, y: 32 * scale,
                         width: 352 * scale, height: 190 * scale)

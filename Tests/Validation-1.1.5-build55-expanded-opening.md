@@ -1,0 +1,11 @@
+# 1.1.5 (55) expanded recording overlay
+
+The Build 54 report showed a 1206 × 9352 portrait result with a wide expanded overlay above a photographic profile. Its dark shell extends to about row 290. Visible app navigation begins around row 224 on either side. The compact status cut cannot safely reach the bottom of this overlay. The existing expanded-overlay inspector also missed it because both photo edges were dark. Device inventory read back Build 54 and the latest completed recording had 48 native frames. The saved result and processing log cannot establish whether that recording contained an equivalent clear viewport.
+
+With Keep status bar OFF, a bounded expanded contour identifies a potential obstruction in an opening piece. Recovery uses a frame from the same capture segment and geometry. Its visible navigation and textured body must match, and its compact status cut must be proven. The full opening prefix and affected body rows come from that original frame. When recovery fails, the app explains that the Dynamic Island covered the opening and keeps the original frames. Keep status bar ON preserves the observed expanded header.
+
+The production contour check enclosed the reported overlay in a native `(174, 28, 816, 274)` rectangle. The test checks the original locally without recording image data in the repository. Native tests passed 60 assertions. UIKit passed 236 assertions, including a dim photo opening with both navigation regions, native body restoration from a settled matching frame, unmodified ON, changed navigation rejection, a different viewport rejection, preserving visible prefix rows when the legacy mask ends above the true overlay, and immutable inputs.
+
+The final coherent run passed **33/33** gates, including performance, pinned baseline output, horizontal geometry and standard device/simulator builds. Source/config/test SHA-256 is `6d868e4b4276b583c49059efd5b04f4197ac28c6764c8c30cccd0ce67c3fbdf9`. Report: `Build/regression-AmS0e4/report.json`.
+
+The signed standard device package passed strict signature and entitlement checks for 1.1.5 (55), including the widget. Its image diagnostic and developer hooks are absent. Connected iPhone acceptance is pending. Physical iPhone Duo acceptance remains unverified.
