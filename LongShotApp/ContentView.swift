@@ -10,6 +10,11 @@ enum ScrollPalette {
     static let warning = Color(red: 0.62, green: 0.42, blue: 0.18)
 }
 
+private struct FeedbackDraft: Identifiable {
+    let id = UUID()
+    let diagnostics: String
+}
+
 struct ContentView: View {
     @ObservedObject var model: AppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -24,6 +29,7 @@ struct ContentView: View {
     @State private var showingUsageGuide = false
     @State private var usageGuideIsInitial = false
     @State private var showingSettings = false
+    @State private var feedbackDraft: FeedbackDraft?
     @AppStorage(CaptureOptions.axisKey) private var captureAxis = CaptureAxis.vertical.rawValue
 
     private var language: AppLanguage { AppLanguage(rawValue: languageCode) ?? AppLanguage.initialLanguage }
@@ -47,9 +53,13 @@ struct ContentView: View {
             .sheet(isPresented: $showingSettings) {
                 CaptureSettingsView(model: model)
             }
+            .sheet(item: $feedbackDraft) { draft in
+                FeedbackView(diagnostics: draft.diagnostics)
+            }
             .fullScreenCover(isPresented: fullPreviewBinding) {
                 LongImagePreview(urls: model.outputURLs, omittedOccludedBottomRows: model.omittedOccludedBottomRows,
-                                 outputsSeparatedByGeometry: model.outputsSeparatedByGeometry)
+                                 outputsSeparatedByGeometry: model.outputsSeparatedByGeometry,
+                                 makeFeedbackDiagnostics: model.feedbackDiagnostics(forOutput:))
             }
             .fullScreenCover(isPresented: $showingUsageGuide, onDismiss: completeUsageGuidePresentation) {
                 UsageGuideView(isFirstRun: usageGuideIsInitial) {
@@ -473,14 +483,27 @@ struct ContentView: View {
             .accessibilityIdentifier("home.pageTransition")
 #endif
         case .failed:
-            Button(language.text("查看失败详情")) { showingFailureDetails = true }
-                .font(.callout)
-                .frame(minHeight: 44)
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("home.failureDetails")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 20) { failureActions }
+                VStack(spacing: 0) { failureActions }
+            }
+            .font(.callout)
+            .buttonStyle(.plain)
         case .idle, .choosingSource, .processing, .ready:
             EmptyView()
         }
+    }
+
+    @ViewBuilder
+    private var failureActions: some View {
+        Button(language.text("查看失败详情")) { showingFailureDetails = true }
+            .frame(minHeight: 44)
+            .accessibilityIdentifier("home.failureDetails")
+        Button(language.text("问题反馈")) {
+            feedbackDraft = FeedbackDraft(diagnostics: model.failureFeedbackDiagnostics())
+        }
+        .frame(minHeight: 44)
+        .accessibilityIdentifier("home.feedback")
     }
 
     private var visibleCaptureHint: String? {
@@ -568,11 +591,13 @@ private struct LongImagePreview: View {
     let urls: [URL]
     let omittedOccludedBottomRows: Bool
     var outputsSeparatedByGeometry = false
+    var makeFeedbackDiagnostics: ((URL) -> String)?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appLanguage) private var language
     @State private var selectedPage = 0
     @State private var showingShareSheet = false
+    @State private var feedbackDraft: FeedbackDraft?
 
     var body: some View {
         NavigationStack {
@@ -623,7 +648,15 @@ private struct LongImagePreview: View {
                         Label(language.text("完成"), systemImage: "checkmark")
                     }
                 }
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    if let makeFeedbackDiagnostics, urls.indices.contains(selectedPage) {
+                        Button {
+                            feedbackDraft = FeedbackDraft(diagnostics: makeFeedbackDiagnostics(urls[selectedPage]))
+                        } label: {
+                            Label(language.text("问题反馈"), systemImage: "envelope")
+                        }
+                        .accessibilityIdentifier("preview.feedback")
+                    }
                     Button {
                         showingShareSheet = true
                     } label: {
@@ -634,6 +667,9 @@ private struct LongImagePreview: View {
             }
             .sheet(isPresented: $showingShareSheet) {
                 ActivityView(items: urls)
+            }
+            .sheet(item: $feedbackDraft) { draft in
+                FeedbackView(diagnostics: draft.diagnostics)
             }
         }
     }
@@ -785,6 +821,7 @@ struct CaptureSettingsView: View {
     @AppStorage(CaptureOptions.statusBarKey) private var keepsStatusBar = false
     @State private var confirmingCleanup = false
     @State private var cleanupMessage: String?
+    @State private var feedbackDraft: FeedbackDraft?
 
     var body: some View {
         NavigationStack {
@@ -830,6 +867,15 @@ struct CaptureSettingsView: View {
                 } footer: {
                     Text(language.text("仅清理原始画面和分析缓存，保留系统照片与已生成的本地预览。"))
                 }
+                Section {
+                    Button {
+                        feedbackDraft = FeedbackDraft(diagnostics: model.feedbackDiagnostics())
+                    } label: {
+                        Label(language.text("问题反馈"), systemImage: "envelope")
+                    }
+                    .accessibilityIdentifier("settings.feedback")
+                    .disabled(model.isBusy)
+                }
                 if model.isBusy {
                     Section {
                         Text(language.text("请等待当前录制、整理或清理完成后再修改设置。"))
@@ -841,6 +887,9 @@ struct CaptureSettingsView: View {
             .background(ScrollPalette.paper)
             .navigationTitle(language.text("设置"))
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(item: $feedbackDraft) { draft in
+                FeedbackView(diagnostics: draft.diagnostics)
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button { dismiss() } label: {

@@ -8,4 +8,4 @@ The detector distinguished the reported joined shape from the detached reference
 
 The final coherent run passed **33/33** gates, including performance, pinned baseline output, horizontal geometry and standard device/simulator builds. Source/config/test SHA-256 is `ee672158b8e2a6910ada6686a41ae50950607117a82deb953b59823436ca2e4a`. Report: `Build/regression-z7NJJq/report.json`.
 
-The standard Build 56 device export passed strict signature, entitlement, version and bilingual resource checks. Real iPhone capture acceptance remains pending.
+The standard Build 56 device export passed strict signature, entitlement, version and bilingual resource checks. The owner confirmed on iPhone that the Dynamic Island and recording dot are separate and that the time and battery details are clear.

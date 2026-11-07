@@ -8,6 +8,10 @@ enum CaptureProcessingDiagnostics {
     static var sessionID: String?
     static let processRunID = UUID().uuidString
     private static let maximumEvents = 240
+    static var journalURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("LongShotProcessingEvents.json")
+    }
     private static let timestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -25,8 +29,7 @@ enum CaptureProcessingDiagnostics {
 
     static func record(_ event: String, sessionID: String? = nil, values: [String: Any] = [:]) {
         do {
-            let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let destination = directory.appendingPathComponent("LongShotProcessingEvents.json")
+            let destination = journalURL
             var events = (try? Data(contentsOf: destination)).flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]]
             } ?? []

@@ -7,7 +7,10 @@ const model = read('LongShotApp/AppModel.swift');
 assert.ok(view.includes('.accessibilityIdentifier("home.settings")'));
 assert.ok(view.includes('.frame(width: 44, height: 44)'));
 assert.ok(settings.includes('.pickerStyle(.segmented)'));
-assert.equal((settings.match(/\.disabled\(model.isBusy\)/g) || []).length, 3);
+for (const control of ['axis', 'statusBar', 'feedback']) {
+  assert.match(settings, new RegExp(String.raw`\.accessibilityIdentifier\("settings\.${control}"\)\s*\.disabled\(model\.isBusy\)`));
+}
+assert.match(settings, /\.disabled\(model\.isBusy\)\s*\.accessibilityIdentifier\("settings\.clearCache"\)/);
 assert.ok(settings.includes('.alert(language.text("清理所有缓存？")'));
 assert.ok(settings.includes('Button(language.text("取消"), role: .cancel) {}'));
 assert.ok(settings.includes('Button(language.text("清理缓存"), role: .destructive)'));
@@ -24,4 +27,4 @@ const cache = read('LongShotApp/FramePreparationCache.swift');
 assert.ok(cache.includes('!CaptureStorage.hasDiscardedRawFrames'));
 assert.ok(model.includes('!CaptureStorage.hasDiscardedRawFrames'));
 assert.ok(!/PHAssetChangeRequest\.(deleteAssets|delete)/.test(model));
-console.log('Capture settings integration contracts passed (17); source-level only, not touch/VoiceOver verification.');
+console.log('Capture settings integration contracts passed; source-level only, not touch/VoiceOver verification.');

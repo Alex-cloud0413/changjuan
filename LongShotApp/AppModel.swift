@@ -36,6 +36,7 @@ final class AppModel: ObservableObject {
     }()
 
     private var activeSessionURL: URL?
+    private var failedSessionURL: URL?
     private var processingSessionID: String?
     private let liveActivityManager = CaptureLiveActivityManager()
     private let resultNotificationManager = ResultNotificationManager()
@@ -162,6 +163,7 @@ final class AppModel: ObservableObject {
         storageMaintenanceRequested = false
         explicitPreviewSessionID = nil
         isSavedPreviewRequested = false
+        CaptureProcessingDiagnostics.sessionID = nil
         outputURLs = []
         previewImage = nil
         omittedOccludedBottomRows = false
@@ -206,6 +208,7 @@ final class AppModel: ObservableObject {
             return
         }
 
+        var recoveredSessionURL: URL?
         do {
             guard let latest = try CaptureStorage.allSessions().first(where: {
                 !CaptureStorage.hasDiscardedRawFrames(in: $0.url)
@@ -217,14 +220,16 @@ final class AppModel: ObservableObject {
             }
 
             activeSessionURL = latest.url
+            recoveredSessionURL = latest.url
             CaptureProcessingDiagnostics.sessionID = latest.manifest.id
             lastCaptureDate = latest.manifest.startedAt
 
             switch latest.manifest.state {
             case .capturing:
-                presentFailure("上一次系统录制没有正常结束。请先停止顶部录制标记，再重新开始；本地画面已保留。")
+                presentFailure("上一次系统录制没有正常结束。请先停止顶部录制标记，再重新开始；本地画面已保留。",
+                               sessionURL: latest.url)
             case .failed:
-                presentFailure(latest.manifest.failureMessage ?? "屏幕捕获没有正常完成。")
+                presentFailure(latest.manifest.failureMessage ?? "屏幕捕获没有正常完成。", sessionURL: latest.url)
             case .complete:
                 let existing = CaptureStorage.existingOutputs(in: latest.url)
                 if !existing.isEmpty {
@@ -271,8 +276,46 @@ final class AppModel: ObservableObject {
             }
         } catch {
             processingSessionID = nil
-            presentFailure(error.localizedDescription)
+            presentFailure(error.localizedDescription, sessionURL: recoveredSessionURL)
         }
+    }
+
+    func feedbackDiagnostics() -> String {
+        makeFeedbackDiagnostics(sessionURL: nil)
+    }
+
+    func failureFeedbackDiagnostics() -> String {
+        guard case .failed = phase else { return feedbackDiagnostics() }
+        return makeFeedbackDiagnostics(sessionURL: failedSessionURL)
+    }
+
+    func feedbackDiagnostics(forOutput url: URL) -> String {
+        let outputDirectory = url.deletingLastPathComponent()
+        guard let activeSessionURL, outputURLs.contains(url),
+              outputDirectory.lastPathComponent == CaptureConstants.outputsDirectoryName,
+              outputDirectory.deletingLastPathComponent().standardizedFileURL == activeSessionURL.standardizedFileURL else {
+            return feedbackDiagnostics()
+        }
+        return makeFeedbackDiagnostics(sessionURL: activeSessionURL)
+    }
+
+    private func makeFeedbackDiagnostics(sessionURL: URL?) -> String {
+        let manifest = sessionURL.flatMap { url -> CaptureManifest? in
+            guard let manifest = try? CaptureStorage.readManifest(at: url),
+                  manifest.id == url.lastPathComponent else { return nil }
+            return manifest
+        }
+        let capture = manifest?.captureOptions.map { options in
+            FeedbackDiagnostics.Capture(axis: options.axis == .vertical ? .vertical : .horizontal,
+                                        keepsStatusBar: options.keepsStatusBar)
+        }
+        return FeedbackDiagnostics.makeReport(
+            journalURL: CaptureProcessingDiagnostics.journalURL,
+            sessionID: manifest?.id,
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+            build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
+            capture: capture
+        )
     }
 
     func retryProcessing() async {
@@ -478,7 +521,7 @@ final class AppModel: ObservableObject {
             failedManifest.savedToPhotos = false
             try? CaptureStorage.write(failedManifest, to: sessionURL)
             processingSessionID = nil
-            presentFailure(error.localizedDescription)
+            presentFailure(error.localizedDescription, sessionURL: sessionURL)
         }
     }
 
@@ -668,7 +711,8 @@ final class AppModel: ObservableObject {
         scheduleStorageMaintenance()
     }
 
-    private func presentFailure(_ message: String) {
+    private func presentFailure(_ message: String, sessionURL: URL? = nil) {
+        failedSessionURL = sessionURL
         phase = .failed(message)
         updateSystemState(.failed)
         liveActivityManager.markFailed()
@@ -824,7 +868,7 @@ extension AppModel: ScreenCaptureCoordinatorDelegate {
         isPageTransitionPaused = false
 
         if manifest.state == .failed {
-            presentFailure(manifest.failureMessage ?? "屏幕捕获没有正常完成。")
+            presentFailure(manifest.failureMessage ?? "屏幕捕获没有正常完成。", sessionURL: sessionURL)
             return
         }
 
