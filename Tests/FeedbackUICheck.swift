@@ -88,7 +88,10 @@ final class FeedbackUICheck: XCTestCase {
         reveal(handoff, in: app)
         XCTAssertTrue(["Choose mail app", "选择邮件 App"].contains(handoff.label))
         let defaultMail = app.buttons.matching(NSPredicate(format: "label IN %@", [
-            "Copy body and open Default Mail App", "拷贝正文并打开默认邮件 App"
+            "Default Mail App", "默认邮件 App"
+        ])).firstMatch
+        let systemDefaults = app.buttons.matching(NSPredicate(format: "label IN %@", [
+            "Change system default mail app", "更改系统默认邮件 App"
         ])).firstMatch
         let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["Cancel", "取消"])).firstMatch
 
@@ -116,6 +119,22 @@ final class FeedbackUICheck: XCTestCase {
 
         reveal(handoff, in: app)
         handoff.tap()
+        XCTAssertTrue(systemDefaults.waitForExistence(timeout: 5))
+        systemDefaults.tap()
+        let settingsApp = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        if settingsApp.wait(for: .runningForeground, timeout: 5) {
+            app.activate()
+        } else {
+            let notice = app.staticTexts["feedback.result"]
+            XCTAssertTrue(notice.waitForExistence(timeout: 5))
+            XCTAssertTrue(["Choose Email under Default Apps in Settings.",
+                           "请在系统设置的默认 App 中选择电子邮件。"].contains(notice.label))
+        }
+        XCTAssertEqual(description.value as? String, body)
+        XCTAssertEqual(includeDiagnostics.value as? String, "1")
+
+        reveal(handoff, in: app)
+        handoff.tap()
         XCTAssertTrue(defaultMail.waitForExistence(timeout: 5))
         defaultMail.tap()
 
@@ -126,8 +145,8 @@ final class FeedbackUICheck: XCTestCase {
         let handled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             if app.state != .runningForeground { return mail.state == .runningForeground }
             guard result.exists else { return false }
-            return ["Couldn’t open a mail app. The body is copied and can be pasted into another mail app.",
-                    "无法打开邮件 App。正文已拷贝，可在其他邮件 App 中粘贴。"].contains(result.label)
+            return ["Couldn’t open a mail app. Copy the feedback body and send it manually.",
+                    "无法打开邮件 App，请拷贝反馈正文后手动发送。"].contains(result.label)
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [handled], timeout: 10), .completed)
     }

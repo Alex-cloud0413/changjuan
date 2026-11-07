@@ -8,6 +8,7 @@ struct FeedbackMailDraftCheck {
     private static let diagnosticsPasteHint = "[Paste the copied diagnostics at the end.]"
     private static let bodyPasteHint = "[Replace this line with the copied feedback.]"
     private static let addressed = "mailto:support@example.invalid?subject=%E9%95%BF%E5%8D%B7%E9%97%AE%E9%A2%98%E5%8F%8D%E9%A6%88"
+    private static let urlLimit = FeedbackMailDraft.maximumDraftURLBytes
 
     static func main() {
         let body = "第一行 + 100% #状态\n第二行 &bcc=other@example.invalid 🤖 <img src=\"https://example.invalid/x\"> 'quoted'"
@@ -18,6 +19,11 @@ struct FeedbackMailDraftCheck {
         checkFullURL(draft, expectedSubject: subject, expectedBody: inline)
         precondition(draft.addressedMailtoURL()?.absoluteString == addressed)
         checkHandoffs(draft, expectedBody: inline, expectedPaste: nil)
+        let outlookDraft = draft.mailtoURL(diagnosticsLabel: label, to: .outlook)
+        let outlookQuery = outlookDraft.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems }
+        precondition(outlookQuery?.last?.value?.contains(#"&lt;img src="https://example.invalid/x"&gt; 'quoted'"#) == true)
+
+        checkReceiptScalePrefill()
 
         let subjectWithDelimiters = "问题 + &cc=other@example.invalid"
         let delimiterDraft = FeedbackMailDraft(recipient: recipient, subject: subjectWithDelimiters,
@@ -29,8 +35,8 @@ struct FeedbackMailDraftCheck {
         checkHandoffs(delimiterDraft, expectedBody: body, expectedPaste: nil)
 
         // Chinese fits as UTF-8 text here, but its percent-encoded URL exceeds the cap.
-        let longChinese = String(repeating: "截", count: 300)
-        precondition(longChinese.utf8.count < 2_000)
+        let longChinese = String(repeating: "截", count: urlLimit / 9 + 1)
+        precondition(longChinese.utf8.count < urlLimit)
         let oversizedBody = FeedbackMailDraft(recipient: recipient, subject: subject,
                                               body: longChinese, diagnostics: nil)
         precondition(oversizedBody.mailtoURL(diagnosticsLabel: label) == nil)
@@ -43,7 +49,7 @@ struct FeedbackMailDraftCheck {
         checkHandoffs(oversizedBodyWithReport, expectedBody: bodyPasteHint,
                       expectedPaste: .body("\(longChinese)\n\n\(label)\n\(report)"))
 
-        let longReport = String(repeating: "report-token", count: 200)
+        let longReport = String(repeating: "report-token", count: urlLimit / "report-token".utf8.count + 1)
         let oversizedReport = FeedbackMailDraft(recipient: recipient, subject: subject, body: body, diagnostics: longReport)
         precondition(oversizedReport.mailtoURL(diagnosticsLabel: label) == nil)
         precondition(oversizedReport.inlineBody(diagnosticsLabel: label) == "\(body)\n\n\(label)\n\(longReport)")
@@ -53,7 +59,7 @@ struct FeedbackMailDraftCheck {
                       expectedPaste: .diagnostics(diagnosticsOnly))
         // If the hint itself would overflow, the original issue still fits.
         checkHandoffs(oversizedReport, expectedBody: body, expectedPaste: .diagnostics(diagnosticsOnly),
-                      diagnosticsHint: String(repeating: "?", count: 700))
+                      diagnosticsHint: String(repeating: "?", count: urlLimit))
 
         let withoutReport = FeedbackMailDraft(recipient: recipient, subject: subject, body: body, diagnostics: nil)
         checkFullURL(withoutReport, expectedSubject: subject, expectedBody: body)
@@ -66,13 +72,61 @@ struct FeedbackMailDraftCheck {
         checkHandoffs(namedWithoutReport, expectedBody: body, expectedPaste: nil,
                       namedHeader: "to=support%2Blongshot%40example.invalid&subject=%E9%97%AE%E9%A2%98%20%2B%20%26cc%3Dother%40example.invalid")
 
-        let limitBody = String(repeating: "x", count: 2_000 - addressed.utf8.count - "&body=".utf8.count)
-        let limitDraft = FeedbackMailDraft(recipient: recipient, subject: subject, body: limitBody, diagnostics: nil)
-        precondition(limitDraft.mailtoURL(diagnosticsLabel: label)?.absoluteString.utf8.count == 2_000)
-        let overLimitDraft = FeedbackMailDraft(recipient: recipient, subject: subject, body: limitBody + "x", diagnostics: nil)
-        precondition(overLimitDraft.mailtoURL(diagnosticsLabel: label) == nil)
+        checkExactURLLimit()
 
         print("Feedback email draft checks passed: body prefilling, safe HTML, length cap, and complete paste fallbacks.")
+    }
+
+    private static func checkReceiptScalePrefill() {
+        let description = String(repeating: "滚动截图后检查邮件正文是否完整。", count: 9)
+        // Synthetic capture data with the same shape and scale as a full report.
+        let report = """
+        {"appVersion":"1.1.5","build":"61","capture":{"axis":"vertical","keepsStatusBar":false},"events":[
+        {"event":"captureStarted"},
+        {"autoStopped":false,"event":"captureFinishStarted"},
+        {"elapsedSeconds":{"seconds":0.052},"event":"captureQueueDrained"},
+        {"elapsedSeconds":{"seconds":0.095},"event":"streamStopFinished"},
+        {"counts":{"accepted":64,"backwardPTSCount":0,"callbackCount":843,"encoding":0,"finishRequest":1,
+        "hostForeground":7,"incompleteStatus":4,"invalidBuffer":0,"invalidPTSCount":0,"missingImage":0,
+        "negativeDeltaFromSavedCount":0,"nonfinitePTSCount":0,"notReady":0,"paused":0,"ptsEpochChangeCount":0,
+        "repeatedPTSCount":2,"sealed":0,"throttled":777,"writeFailed":0,"zeroDeltaFromSavedCount":0},
+        "elapsedSeconds":{"maximumCallbackGap":0.017,"maximumPTSGap":0.034,"wallSeconds":13.95},
+        "event":"capturePipelineSnapshot","frameSize":{"height":2622,"width":1206}},
+        {"counts":{"frameCount":64},"event":"captureStopped"},
+        {"counts":{"frameCount":64,"inputPageCount":3},"elapsedSeconds":{"captureStoppedToProcessingSeconds":0.093},
+        "event":"processingStarted"},
+        {"counts":{"frameCount":64},"event":"stitchingQueued"},
+        {"counts":{"fallbackFrameCount":0,"outputCount":1,"preparedAlignmentCount":63,"preparedFrameCount":64},
+        "elapsedSeconds":{"assemblySeconds":0.843,"renderingSeconds":0.14,"samplingSeconds":1.071,
+        "selectionSeconds":0.041,"stitchDispatchDelaySeconds":0.011,"stitchReturnDelaySeconds":0.004,
+        "stitchingSeconds":2.067},"event":"stitchingFinished"},
+        {"elapsedSeconds":{"seconds":0.006},"event":"photosAuthorizationFinished"},
+        {"elapsedSeconds":{"photosCallbackResumeSeconds":0.008,"photosWriteSeconds":0.218},"event":"photosWriteFinished"},
+        {"elapsedSeconds":{"processingWallSeconds":3.048,"resultPersistenceSeconds":0.027},"event":"resultSaved"}
+        ],"osVersion":{"major":27,"minor":2,"patch":0},"schemaVersion":1}
+        """.replacingOccurrences(of: "\n", with: "")
+        precondition((1_800...2_000).contains(report.utf8.count))
+        let reportJSON = (try? JSONSerialization.jsonObject(with: Data(report.utf8))) as? [String: Any]
+        precondition((reportJSON?["events"] as? [[String: Any]])?.count == 12)
+
+        let draft = FeedbackMailDraft(recipient: recipient, subject: subject, body: description, diagnostics: report)
+        checkHandoffs(draft, expectedBody: "\(description)\n\n\(label)\n\(report)", expectedPaste: nil)
+        for client in FeedbackMailClient.allCases {
+            let encodedSize = draft.mailtoURL(diagnosticsLabel: label, to: client)?.absoluteString.utf8.count ?? 0
+            precondition(encodedSize > 2_000, "The realistic fixture must exceed the old URL budget")
+        }
+    }
+
+    private static func checkExactURLLimit() {
+        let sample = FeedbackMailDraft(recipient: recipient, subject: subject, body: "x", diagnostics: nil)
+        for client in FeedbackMailClient.allCases {
+            let sampleSize = sample.mailtoURL(diagnosticsLabel: label, to: client)!.absoluteString.utf8.count
+            let limitBody = String(repeating: "x", count: urlLimit - sampleSize + 1)
+            let limitDraft = FeedbackMailDraft(recipient: recipient, subject: subject, body: limitBody, diagnostics: nil)
+            precondition(limitDraft.mailtoURL(diagnosticsLabel: label, to: client)?.absoluteString.utf8.count == urlLimit)
+            let overLimitDraft = FeedbackMailDraft(recipient: recipient, subject: subject, body: limitBody + "x", diagnostics: nil)
+            precondition(overLimitDraft.mailtoURL(diagnosticsLabel: label, to: client) == nil)
+        }
     }
 
     private static func checkHandoffs(_ draft: FeedbackMailDraft, expectedBody: String,
@@ -91,7 +145,7 @@ struct FeedbackMailDraftCheck {
             }
             precondition(handoff.client == client)
             precondition(handoff.url.absoluteString.hasPrefix(prefix))
-            precondition(handoff.url.absoluteString.utf8.count <= 2_000)
+            precondition(handoff.url.absoluteString.utf8.count <= urlLimit)
             precondition(components.fragment == nil)
             let recipientItem = URLQueryItem(name: "to", value: draft.recipient)
             let subjectItem = URLQueryItem(name: "subject", value: draft.subject)

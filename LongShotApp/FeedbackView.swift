@@ -55,13 +55,13 @@ struct FeedbackView: View {
                     Button(language.text("选择邮件 App"), action: chooseMailApp)
                         .accessibilityIdentifier("feedback.continueToEmail")
                         .disabled(trimmedDescription.isEmpty)
-                    Button(language.text("拷贝反馈正文"), action: copyFeedback)
+                    Button(language.text("手动发送时拷贝正文"), action: copyFeedback)
                         .accessibilityIdentifier("feedback.copyText")
                         .disabled(trimmedDescription.isEmpty)
                     LabeledContent(language.text("收件人"), value: Self.supportAddress)
                         .textSelection(.enabled)
                 } footer: {
-                    Text(language.text("请在邮件中确认发送。"))
+                    Text(language.text("选择邮件 App 后，打开草稿核对预填内容再发送。"))
                 }
                 if let notice {
                     Section {
@@ -86,6 +86,7 @@ struct FeedbackView: View {
                 ForEach(mailHandoffs) { handoff in
                     Button(handoffTitle(handoff)) { openEmail(handoff) }
                 }
+                Button(language.text("更改系统默认邮件 App"), action: openDefaultMailSettings)
                 Button(language.text("取消"), role: .cancel) {}
             } message: {
                 if mailHandoffs.contains(where: { $0.paste != nil }) {
@@ -151,6 +152,13 @@ struct FeedbackView: View {
         }
         notice = nil
         mailDraft = draft
+    }
+
+    private func openDefaultMailSettings() {
+        guard let url = URL(string: UIApplication.openDefaultApplicationsSettingsURLString) else { return }
+        openURL(url) { accepted in
+            if !accepted { showNotice("请在系统设置的默认 App 中选择电子邮件。") }
+        }
     }
 
     private func openEmail(_ handoff: FeedbackMailHandoff) {

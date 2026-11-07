@@ -26,6 +26,9 @@ struct FeedbackMailHandoff: Identifiable {
 }
 
 struct FeedbackMailDraft: Identifiable {
+    // Local budget for compose links, not a guarantee about a recipient app.
+    static let maximumDraftURLBytes = 16 * 1024
+
     let id = UUID()
     let recipient: String
     let subject: String
@@ -82,7 +85,7 @@ struct FeedbackMailDraft: Identifiable {
 
     private func draftURL(header: URL, message: String, client: FeedbackMailClient) -> URL? {
         // Cap the encoded URL, including the expansion of non-ASCII characters.
-        let limit = 2_000
+        let limit = Self.maximumDraftURLBytes
         guard !message.isEmpty, message.utf8.count <= limit else { return nil }
         let formatted = client == .outlook ? outlookBody(from: message) : message
         guard let body = formatted.addingPercentEncoding(withAllowedCharacters: Self.unreserved) else { return nil }
@@ -96,8 +99,6 @@ struct FeedbackMailDraft: Identifiable {
         text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&#39;")
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\n", with: "<br>")
