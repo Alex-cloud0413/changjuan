@@ -573,6 +573,10 @@ struct StatusBarCropCheck {
 
     private enum PhotoOpening: String {
         case sameViewport, changedNavigation, movedViewport, legacyMasked, weakerStatusPeer
+        case movedFlatViewport, movedFlatChangedNavigation
+
+        var hasFlatStatusBackground: Bool { self == .movedFlatViewport || self == .movedFlatChangedNavigation }
+        var startsScrollingImmediately: Bool { self == .movedViewport || hasFlatStatusBackground }
     }
 
     private static func checkExpandedPhotoOpeningIntegration(in root: URL) throws {
@@ -692,9 +696,10 @@ struct StatusBarCropCheck {
     private static func checkDetachedStatusPeerIntegration(in root: URL) throws {
         let bridge = CGRect(x: 793, y: 89, width: 16, height: 16)
         let leftNav = CGRect(x: 30, y: 223, width: 79, height: 52)
-        for scenario in [PhotoOpening.sameViewport, .changedNavigation, .movedViewport, .weakerStatusPeer] {
+        for scenario in [PhotoOpening.sameViewport, .changedNavigation, .movedViewport, .weakerStatusPeer,
+                         .movedFlatViewport, .movedFlatChangedNavigation] {
             let directory = root.appendingPathComponent(scenario.rawValue)
-            let offsets = scenario == .movedViewport ? [0, 137, 274, 411] : [0, 0, 137, 274]
+            let offsets = scenario.startsScrollingImmediately ? [0, 137, 274, 411] : [0, 0, 137, 274]
             let frames = try makeScrollFrames(in: directory.appendingPathComponent("frames"), status: true,
                 count: offsets.count, jpegQuality: 0.9, scrollOffsets: offsets,
                 photoOpening: scenario, joinedStatusOpening: true)
@@ -715,9 +720,10 @@ struct StatusBarCropCheck {
             let body = CGRect(x: 0, y: 320, width: opening.width, height: 512)
             require(nativePixelError(opening, rect: bridge, peer, rect: bridge) > 150,
                     "The actual opening joins the recording shapes and the peer has a clear gap")
-            require((nativePixelError(opening, rect: body, peer, rect: body) == 0) == (scenario != .movedViewport),
+            require((nativePixelError(opening, rect: body, peer, rect: body) == 0) == !scenario.startsScrollingImmediately,
                     "The compact peer has matching captured body pixels only at the duplicate viewport")
-            require((nativePixelError(opening, rect: leftNav, peer, rect: leftNav) > 5) == (scenario == .changedNavigation),
+            let changesNavigation = scenario == .changedNavigation || scenario == .movedFlatChangedNavigation
+            require((nativePixelError(opening, rect: leftNav, peer, rect: leftNav) > 5) == changesNavigation,
                     "The changed-navigation peer differs below the status band")
 
             let on = try FrameStitcher(options: CaptureOptions(keepsStatusBar: true)).stitch(
@@ -726,7 +732,7 @@ struct StatusBarCropCheck {
             let kept = try readImage(on.outputURLs[0])
             require(kept.width == opening.width && kept.height == opening.height + offsets.last!,
                     "ON retains native dimensions and every newly observed body row")
-            let verifiedPeer = scenario == .sameViewport
+            let verifiedPeer = scenario == .sameViewport || scenario == .movedFlatViewport
             let source = verifiedPeer ? peer : opening
             for (name, roi) in [("full top band", CGRect(x: 0, y: 0, width: source.width, height: 196)),
                                 ("clock", CGRect(x: 65, y: 60, width: 210, height: 90)),
@@ -739,6 +745,8 @@ struct StatusBarCropCheck {
             }
             require(nativePixelError(opening, rect: leftNav, kept, rect: leftNav) < 5,
                     "ON retains the original visible application navigation")
+            require(nativePixelError(opening, rect: body, kept, rect: body) < 5,
+                    "ON retains the original opening body rows after any status substitution")
             if verifiedPeer {
                 let cut = Int(CaptureStatusBarDetector.bottom(in: opening, maximumBottom: 196,
                     allowsClocklessRecording: true) ?? 0)
@@ -1060,7 +1068,8 @@ struct StatusBarCropCheck {
         return try (0..<count).map { index in
             // Different temporal headers expose accidentally detecting frame zero
             // instead of the source selected for the beginning of a reverse capture.
-            let temporalOffset = headerOffset + CGFloat(index * (axis == .vertical ? 2 : headerMovement))
+            let headerIndex = photoOpening?.hasFlatStatusBackground == true ? min(index, 1) : index
+            let temporalOffset = headerOffset + CGFloat(headerIndex * (axis == .vertical ? 2 : headerMovement))
             let scrollOffset = scrollOffsets?[index] ?? index * 137
             let expandedPhoto = photoOpening != nil && index == 0 && !joinedStatusOpening
             let pair: FullScreenPair? = joinedStatusOpening ? (index == 0 ? .joinedRecording : .recording) : fullScreenPair
@@ -1073,9 +1082,15 @@ struct StatusBarCropCheck {
             let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { context in
                 UIImage(cgImage: header).draw(at: .zero)
                 if let photoProfile {
+                    let navigationTop: CGFloat
+                    switch photoOpening {
+                    case .movedViewport: navigationTop = 157
+                    case .movedFlatViewport, .movedFlatChangedNavigation: navigationTop = 202
+                    default: navigationTop = 180
+                    }
                     context.cgContext.saveGState()
-                    context.cgContext.clip(to: CGRect(x: 0, y: 180 * scale,
-                        width: CGFloat(width), height: 140 * scale))
+                    context.cgContext.clip(to: CGRect(x: 0, y: navigationTop * scale,
+                        width: CGFloat(width), height: (320 - navigationTop) * scale))
                     UIImage(cgImage: photoProfile).draw(at: .zero)
                     context.cgContext.restoreGState()
                 }
@@ -1086,7 +1101,8 @@ struct StatusBarCropCheck {
                 context.cgContext.restoreGState()
                 if let photoOpening {
                     drawPhotoOpening(in: context.cgContext, scale: scale, expanded: expandedPhoto,
-                        changedNavigation: photoOpening == .changedNavigation && index == 1,
+                        changedNavigation: (photoOpening == .changedNavigation
+                            || photoOpening == .movedFlatChangedNavigation) && index > 0,
                         legacyMasked: photoOpening == .legacyMasked)
                 } else {
                     UIColor.white.setFill()

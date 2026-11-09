@@ -1129,46 +1129,63 @@ final class FrameStitcher {
         var replacements: [Int: (url: URL, cut: CGFloat)] = [:]
         var inspected = Set<Int>()
         var expanded: [Int: CGRect] = [:]
+        let positions = Dictionary(uniqueKeysWithValues: positioned.map { ($0.index, $0.offset) })
 
-        func openingCandidates(for frame: PositionedFrame) -> ArraySlice<Int> {
-            let positions = Dictionary(uniqueKeysWithValues: positioned.map { ($0.index, $0.offset) })
+        func openingCandidates(for frame: PositionedFrame, includingNearbyScroll: Bool = false) -> ArraySlice<Int> {
             return observed.filter { index in
                 index != frame.index && samples[index].coveredTop == 0
-                    && (positions[index].map { $0 == frame.offset } ?? (abs(index - frame.index) <= 12))
+                    && (positions[index] == frame.offset
+                        || (abs(index - frame.index) <= 12 && (positions[index] == nil || includingNearbyScroll)))
             }.sorted { abs($0 - frame.index) < abs($1 - frame.index) }.prefix(24)
         }
 
-        func preferredStatusSource(for frame: PositionedFrame) -> URL? {
+        func preferredStatusSource(for frame: PositionedFrame) -> (url: URL, stripBottom: CGFloat?)? {
             guard prefersClearStatus,
                   let opening = UIImage(contentsOfFile: samples[frame.index].url.path)?.cgImage,
                   let original = CaptureStatusBarDetector.presentation(in: opening, maximumBottom: contentTop) else { return nil }
             var bestSource: URL?
             var bestDetail = 0.0
-            for index in openingCandidates(for: frame) {
+            var bestStrip: (url: URL, bottom: CGFloat, detail: Double)?
+            let canUseSettledStrip = original.hasRecordingMark && !original.hasDetachedRecordingBubble
+            for index in openingCandidates(for: frame, includingNearbyScroll: canUseSettledStrip) {
                 let source = samples[index].url
-                let detail: Double? = autoreleasepool {
+                autoreleasepool {
                     guard let candidate = UIImage(contentsOfFile: source.path)?.cgImage,
                           let status = CaptureStatusBarDetector.presentation(in: candidate, maximumBottom: contentTop),
                           status.hasDetachedRecordingBubble,
-                          status.clockDetail > 0, status.rightDetail > 0 else { return nil }
+                          status.clockDetail > 0, status.rightDetail > 0 else { return }
                     let clock = status.clockDetail / max(original.clockDetail, 0.000001)
                     let right = status.rightDetail / max(original.rightDetail, 0.000001)
+                    let detail = clock + right
                     let statusBottom = max(original.bottom, status.bottom)
                     guard min(clock, right) >= 0.95,
                           !original.hasDetachedRecordingBubble || max(clock, right) >= 1.15,
-                          clock + right > bestDetail,
-                          CaptureStatusBarDetector.preservesBatteryDetail(opening, candidate, statusBottom: statusBottom),
-                          SameOpeningViewport.isSameViewport(opening, candidate,
-                              statusBottom: statusBottom, contentTop: contentTop, contentBottom: contentBottom),
-                          CaptureStatusBarDetector.bottom(in: candidate, maximumBottom: statusBottom) != nil else { return nil }
-                    return clock + right
-                }
-                if let detail {
-                    bestSource = source
-                    bestDetail = detail
+                          detail > bestDetail
+                    else { return }
+                    if (positions[index] ?? frame.offset) == frame.offset,
+                       CaptureStatusBarDetector.preservesBatteryDetail(opening, candidate, statusBottom: statusBottom),
+                       SameOpeningViewport.isSameViewport(opening, candidate,
+                        statusBottom: statusBottom, contentTop: contentTop, contentBottom: contentBottom),
+                       CaptureStatusBarDetector.bottom(in: candidate, maximumBottom: statusBottom) != nil {
+                        bestSource = source
+                        bestDetail = detail
+                    } else if bestSource == nil, canUseSettledStrip, positions[index] != nil,
+                              abs(index - frame.index) <= 12, min(clock, right) >= 1.15,
+                              detail > (bestStrip?.detail ?? 0),
+                              CaptureStatusBarDetector.hasBatteryDetail(in: candidate, statusBottom: status.bottom),
+                              let cut = CaptureStatusBarDetector.matchingSolidStrip(opening, original, candidate, status,
+                                  maximumBottom: contentTop),
+                              SameOpeningViewport.hasMatchingNavigation(opening, candidate,
+                                  from: cut, contentTop: contentTop, contentBottom: contentBottom),
+                              CaptureStatusBarDetector.bottom(in: candidate, maximumBottom: status.bottom) != nil {
+                        // Scrolling began before the island settled. Only the
+                        // verified fixed status strip can come from this frame.
+                        bestStrip = (source, cut, detail)
+                    }
                 }
             }
-            return bestSource
+            if let bestSource { return (bestSource, nil) }
+            return bestStrip.map { ($0.url, $0.bottom) }
         }
 
         func recoveredSource(for frame: PositionedFrame, sourceTop: CGFloat) throws -> (url: URL, cut: CGFloat)? {
@@ -1226,11 +1243,17 @@ final class FrameStitcher {
         if first.start == first.frame.offset, outputTop < contentTop {
             let recovered = try recoveredSource(for: first.frame, sourceTop: outputTop)
             if recovered != nil || samples[first.frame.index].coveredTop <= outputTop {
-                // Use the chosen original frame for both the prefix and its
-                // body rows. Status pixels are never pasted from a separate view.
-                preferredOpeningURL = preferredStatusSource(for: first.frame)
-                let source = recovered?.url ?? preferredOpeningURL ?? samples[first.frame.index].url
                 var prefixTop = outputTop
+                if let preferred = preferredStatusSource(for: first.frame) {
+                    if let cut = preferred.stripBottom {
+                        pieces.append(Piece(frameURL: preferred.url,
+                            sourceRect: CGRect(x: 0, y: outputTop, width: width, height: cut - outputTop)))
+                        prefixTop = cut
+                    } else {
+                        preferredOpeningURL = preferred.url
+                    }
+                }
+                let source = recovered?.url ?? preferredOpeningURL ?? samples[first.frame.index].url
                 // Zero means no externally supplied boundary. Inspect the
                 // actual selected JPEG for the removable compact status band.
                 if let recovered {
@@ -1241,9 +1264,11 @@ final class FrameStitcher {
                                                                 allowsClocklessRecording: true) {
                     prefixTop = bottom
                 }
-                pieces.append(Piece(frameURL: source, sourceRect: CGRect(
-                    x: 0, y: prefixTop, width: width, height: contentTop - prefixTop
-                )))
+                if prefixTop < contentTop {
+                    pieces.append(Piece(frameURL: source, sourceRect: CGRect(
+                        x: 0, y: prefixTop, width: width, height: contentTop - prefixTop
+                    )))
+                }
             }
         }
         for item in coverage {
@@ -2245,9 +2270,11 @@ private enum HorizontalScrollMatcher {
 enum CaptureStatusBarDetector {
     struct Presentation {
         let hasDetachedRecordingBubble: Bool
+        let hasRecordingMark: Bool
         let bottom: CGFloat
         let clockDetail: Double
         let rightDetail: Double
+        let islandBounds: CGRect
     }
 
     private struct Capsule {
@@ -2259,6 +2286,7 @@ enum CaptureStatusBarDetector {
         let left: CGFloat
         let right: CGFloat
         let hasDetachedRecordingBubble: Bool
+        let hasRecordingMark: Bool
     }
 
     private static func capsule(in image: CGImage, maximumBottom: CGFloat,
@@ -2447,18 +2475,17 @@ enum CaptureStatusBarDetector {
             let padding = max(2, scaleX)
             let cut = ceil(nativeBottom + padding)
             guard cut <= maximumBottom else { return nil }
-            let hasDetachedRecordingBubble = bubbles.first != nil
-                && recordingMark(in: main, darkCenter: true, allowRingEdgeSamples: true)
+            let hasRecordingMark = recordingMark(in: main, darkCenter: true, allowRingEdgeSamples: true)
+            let hasDetachedRecordingBubble = bubbles.first != nil && hasRecordingMark
             let isClocklessRecording = allowsClocklessRecording && (bubbles.first.map { bubble in
-                recordingMark(in: main, darkCenter: true, allowRingEdgeSamples: true)
-                    && markedBubbles.contains { bubble.enclosesCenteredCore($0) }
+                hasRecordingMark && markedBubbles.contains { bubble.enclosesCenteredCore($0) }
                     && hasQuietSurround(main: main, bubble: bubble, cut: Int(cut))
             } ?? false)
             return Capsule(band: band, top: CGFloat(main.low) * scaleY,
                 bottom: nativeBottom, padding: padding, isClocklessRecording: isClocklessRecording,
                 left: CGFloat(main.left) * scaleX,
                 right: CGFloat(max(main.right, bubbles.first?.right ?? main.right) + 1) * scaleX,
-                hasDetachedRecordingBubble: hasDetachedRecordingBubble)
+                hasDetachedRecordingBubble: hasDetachedRecordingBubble, hasRecordingMark: hasRecordingMark)
         }
         // Preserve the original neutral-background route. Photography requires
         // stricter black geometry plus recording-ring evidence and local contrast.
@@ -2472,8 +2499,7 @@ enum CaptureStatusBarDetector {
         return ceil(evidence.bottom + evidence.padding)
     }
 
-    /// Compare original status bands only after the caller has matched the viewport.
-    /// The scores describe visible edge detail in the native clock and battery lanes.
+    /// Measure visible edge detail in the native clock and battery lanes.
     static func presentation(in image: CGImage, maximumBottom: CGFloat) -> Presentation? {
         guard image.width <= 4096, let evidence = capsule(in: image, maximumBottom: maximumBottom) else { return nil }
         let width = CGFloat(image.width)
@@ -2491,7 +2517,52 @@ enum CaptureStatusBarDetector {
         let right = detail(from: max(width * 0.84, evidence.right + width * 0.018), to: width * 0.965,
                            minimumSpan: width * 0.024)
         return Presentation(hasDetachedRecordingBubble: evidence.hasDetachedRecordingBubble,
-            bottom: ceil(evidence.bottom + evidence.padding), clockDetail: clock, rightDetail: right)
+            hasRecordingMark: evidence.hasRecordingMark,
+            bottom: ceil(evidence.bottom + evidence.padding), clockDetail: clock, rightDetail: right,
+            islandBounds: CGRect(x: evidence.left, y: evidence.top, width: evidence.right - evidence.left,
+                                 height: evidence.bottom - evidence.top))
+    }
+
+    /// A later scroll position may supply only the status strip of a flat,
+    /// fixed header. Prove the same background outside the status glyphs and
+    /// leave a full-width strip of matching pixels at the join.
+    static func matchingSolidStrip(_ opening: CGImage, _ before: Presentation,
+                                   _ candidate: CGImage, _ after: Presentation,
+                                   maximumBottom: CGFloat) -> CGFloat? {
+        let width = opening.width
+        let w = CGFloat(width)
+        let guardRows = 8
+        let cut = Int(max(before.bottom, after.bottom)) + guardRows
+        let rows = cut + guardRows
+        guard width == candidate.width, opening.height == candidate.height,
+              CGFloat(rows) <= maximumBottom, rows <= opening.height else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: width, height: rows)
+        guard let a = statusPixels(in: opening, rect: rect, width: width, height: rows, interpolation: .none),
+              let b = statusPixels(in: candidate, rect: rect, width: width, height: rows, interpolation: .none)
+        else { return nil }
+
+        func difference(_ first: [UInt8], _ i: Int, _ second: [UInt8], _ j: Int) -> Int {
+            max(abs(Int(first[i]) - Int(second[j])), abs(Int(first[i + 1]) - Int(second[j + 1])),
+                abs(Int(first[i + 2]) - Int(second[j + 2])))
+        }
+        guard difference(a, 0, b, 0) <= 4 else { return nil }
+        // The measured island bounds also bound the vertical glyph band. The
+        // small halo permits JPEG ringing around otherwise isolated glyphs.
+        let island = before.islandBounds.union(after.islandBounds).insetBy(dx: -8, dy: -5)
+        let top = Int(floor(island.minY)), bottom = min(cut - guardRows / 2, Int(ceil(island.maxY)))
+        let islandLeft = Int(floor(island.minX)), islandRight = Int(ceil(island.maxX))
+        let clock = Int(w * 0.025)..<Int(ceil(w * 0.27))
+        let indicators = Int(w * 0.80)..<Int(ceil(w * 0.98))
+        for y in 0..<rows {
+            for x in 0..<width {
+                if y >= top, y < bottom,
+                   clock.contains(x) || (x >= islandLeft && x < islandRight) || indicators.contains(x) { continue }
+                let offset = (y * width + x) * 4
+                if difference(a, offset, a, 0) > 14 || difference(b, offset, b, 0) > 14
+                    || difference(a, offset, b, offset) > 12 { return nil }
+            }
+        }
+        return CGFloat(cut)
     }
 
     private static func statusLaneDetail(in image: CGImage, rect: CGRect, minimumSpan: Int) -> Double {
@@ -2563,14 +2634,9 @@ enum CaptureStatusBarDetector {
     /// Compare the fixed rightmost indicator, independently of the wider lane's
     /// edge score. A noisy or changing background cannot stand in for a battery.
     static func preservesBatteryDetail(_ opening: CGImage, _ candidate: CGImage, statusBottom: CGFloat) -> Bool {
-        let width = CGFloat(opening.width)
         guard opening.width == candidate.width, opening.height == candidate.height,
-              statusBottom.isFinite, statusBottom >= width * 0.08, statusBottom <= width * 0.18 else { return false }
-        let rect = CGRect(x: floor(width * 0.845), y: floor(statusBottom - width * 0.078),
-            width: ceil(width * 0.113), height: ceil(width * 0.062))
-        guard rect.maxY <= CGFloat(opening.height),
-              let before = batteryFeature(in: opening, rect: rect),
-              let after = batteryFeature(in: candidate, rect: rect),
+              let before = batteryFeature(in: opening, statusBottom: statusBottom),
+              let after = batteryFeature(in: candidate, statusBottom: statusBottom),
               abs(before.box.midX - after.box.midX) <= 3,
               abs(before.box.midY - after.box.midY) <= 2 else { return false }
         let overlap = before.pixels.reduce(0) { $0 + (after.pixels.contains($1) ? 1 : 0) }
@@ -2579,9 +2645,19 @@ enum CaptureStatusBarDetector {
             && overlap * 100 >= combined * 48
     }
 
-    private static func batteryFeature(in image: CGImage, rect: CGRect) -> (box: CGRect, pixels: Set<Int>)? {
+    static func hasBatteryDetail(in image: CGImage, statusBottom: CGFloat) -> Bool {
+        batteryFeature(in: image, statusBottom: statusBottom) != nil
+    }
+
+    private static func batteryFeature(in image: CGImage, statusBottom: CGFloat) -> (box: CGRect, pixels: Set<Int>)? {
         // Analyze a low-frequency silhouette so a softened but authentic icon
         // can match its sharper rendition. The original pixels are untouched.
+        let nativeWidth = CGFloat(image.width)
+        guard statusBottom.isFinite, statusBottom >= nativeWidth * 0.08,
+              statusBottom <= nativeWidth * 0.18 else { return nil }
+        let rect = CGRect(x: floor(nativeWidth * 0.845), y: floor(statusBottom - nativeWidth * 0.078),
+            width: ceil(nativeWidth * 0.113), height: ceil(nativeWidth * 0.062))
+        guard rect.maxY <= CGFloat(image.height) else { return nil }
         let width = 46, height = 26
         guard let pixels = statusPixels(in: image, rect: rect, width: width, height: height,
                                         interpolation: .medium) else { return nil }
@@ -2944,6 +3020,16 @@ private enum SameOpeningViewport {
                        navigationColumns: [0..<width])
     }
 
+    static func hasMatchingNavigation(_ opening: CGImage, _ candidate: CGImage,
+                                      from stripBottom: CGFloat, contentTop: CGFloat, contentBottom: CGFloat) -> Bool {
+        guard hasComparableGeometry(opening, candidate) else { return false }
+        let top = Int(stripBottom)
+        let last = min(Int(contentBottom), Int(contentTop) + max(32, opening.width / 16))
+        guard top >= 0, last <= opening.height, last - top >= 32 else { return false }
+        return compare(opening, candidate, firstRow: top, lastRow: last, bodyStart: last,
+                       navigationColumns: [0..<opening.width])
+    }
+
     private static func hasComparableGeometry(_ covered: CGImage, _ candidate: CGImage) -> Bool {
         let width = covered.width
         let height = covered.height
@@ -3002,6 +3088,8 @@ private enum SameOpeningViewport {
                 }
             }
         }
+
+        if bodyStart == lastRow { return true }
 
         // Sample original pixels and nearby pixels inside each body tile. Independent
         // local edges spread across rows and columns are required to prove alignment.
